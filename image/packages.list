@@ -24,6 +24,7 @@ intel-microcode
 amd64-microcode
 linux-generic
 initramfs-tools
+plymouth-label
 casper
 grub-common
 grub2-common
