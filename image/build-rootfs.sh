@@ -56,7 +56,7 @@ printf 'LANG=en_US.UTF-8\n' > "$root/etc/default/locale"
 printf 'Africa/Accra\n' > "$root/etc/timezone"
 ln -sfn /usr/share/zoneinfo/Africa/Accra "$root/etc/localtime"
 chroot "$root" systemctl set-default graphical.target
-chroot "$root" systemctl enable greetd NetworkManager systemd-resolved bluetooth
+chroot "$root" systemctl enable greetd NetworkManager systemd-resolved systemd-timesyncd bluetooth
 # No SSH daemon or build/development accounts are part of the live image.
 chroot "$root" dpkg-query -W -f='${Package} ${Version}\n' > /srv/desos-build/rootfs-package-manifest.txt
 touch "$root/.desos-packages-complete"

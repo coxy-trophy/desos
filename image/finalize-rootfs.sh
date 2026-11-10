@@ -42,6 +42,8 @@ chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recomm
 # Reapply the final reviewed integration after every component is present.
 python3 "$here/configure.py" --root "$root"
 bash "$recipes/installer/install-into-rootfs.sh" "$root"
+chroot "$root" systemctl set-default graphical.target
+chroot "$root" systemctl enable greetd NetworkManager systemd-resolved systemd-timesyncd bluetooth
 mkdir -p "$root/usr/share/doc/desos/build"
 for name in kernel-provenance.json source-pin.json signature-status.txt signature-log.txt config-6.18.62-desos baseline.config; do
     cp "$provenance/$name" "$root/usr/share/doc/desos/build/"

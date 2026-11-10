@@ -1,5 +1,6 @@
 systemd-sysv
 systemd-resolved
+systemd-timesyncd
 libpam-systemd
 libpam-gnome-keyring
 dbus-user-session
@@ -43,6 +44,7 @@ pipewire
 pipewire-bin
 pipewire-pulse
 wireplumber
+rtkit
 alsa-utils
 gnome-keyring
 python3
