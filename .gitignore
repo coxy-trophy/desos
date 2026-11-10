@@ -1,0 +1,5 @@
+/work/
+/output/
+/.private/
+__pycache__/
+*.pyc
