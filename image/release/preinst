@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+package=desos-release
+root=${DPKG_ROOT:-}
+admin=${DPKG_ADMINDIR:-${root}/var/lib/dpkg}
+case "$root" in ""|/*) ;; *) echo "$package: DPKG_ROOT must be absolute" >&2; exit 1 ;; esac
+
+divert() {
+    /usr/bin/dpkg-divert --admindir "$admin" --instdir "${root:-/}" "$@"
+}
+fail() { echo "$package: $*" >&2; exit 1; }
+
+case "${1:-}" in
+    install|upgrade) ;;
+    *) exit 0 ;;
+esac
+
+# Check both files before adding either diversion. Never take ownership of a
+# local diversion, a different release package, or an unclaimed backup file.
+for file in /usr/lib/os-release /etc/lsb-release; do
+    owner=$(divert --listpackage "$file")
+    if [ -n "$owner" ]; then
+        [ "$owner" = "$package" ] || fail "$file is already diverted by $owner"
+        [ "$(divert --truename "$file")" = "$file.ubuntu" ] || fail "$file has an unexpected diversion target"
+        continue
+    fi
+    [ ! -e "$root$file.ubuntu" ] && [ ! -L "$root$file.ubuntu" ] || fail "$file.ubuntu already exists without our diversion"
+    [ ! -L "$root$file" ] || fail "$file is a symlink; refusing to replace it"
+    ownership=$(/usr/bin/dpkg-query --admindir "$admin" --search "$file" 2>/dev/null || true)
+    case "$ownership" in
+        "base-files: $file"|"base-files:"*": $file") ;;
+        "") [ ! -e "$root$file" ] || fail "$file is not owned by base-files" ;;
+        *) fail "$file is owned by another package: $ownership" ;;
+    esac
+    if [ -e "$root$file" ]; then
+        [ -f "$root$file" ] || fail "$file is not a regular file"
+        case "$file" in
+            /usr/lib/os-release)
+                /usr/bin/grep -Eq '^ID=(ubuntu|"ubuntu"|\x27ubuntu\x27)[[:space:]]*$' "$root$file" || fail "$file identifies a different vendor" ;;
+            /etc/lsb-release)
+                /usr/bin/grep -Eq '^DISTRIB_ID=(Ubuntu|"Ubuntu"|\x27Ubuntu\x27)[[:space:]]*$' "$root$file" || fail "$file identifies a different vendor" ;;
+        esac
+    elif [ "$file" = /usr/lib/os-release ]; then
+        fail "Ubuntu /usr/lib/os-release is missing"
+    fi
+done
+
+created=""
+rollback() {
+    status=$?
+    trap - 0 1 2 15
+    for file in $created; do
+        divert --package "$package" --remove --rename --divert "$file.ubuntu" "$file" || echo "$package: could not roll back $file" >&2
+    done
+    exit "$status"
+}
+trap rollback 0 1 2 15
+for file in /usr/lib/os-release /etc/lsb-release; do
+    if [ -z "$(divert --listpackage "$file")" ]; then
+        divert --package "$package" --add --rename --divert "$file.ubuntu" "$file"
+        created="$file $created"
+    fi
+done
+trap - 0 1 2 15

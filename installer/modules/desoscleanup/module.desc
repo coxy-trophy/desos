@@ -1,0 +1,7 @@
+---
+type: job
+interface: python
+name: desoscleanup
+script: main.py
+requiredModules: [mount, unpackfs, users]
+noconfig: true

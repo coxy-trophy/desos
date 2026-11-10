@@ -1,0 +1,30 @@
+---
+componentName: desos
+welcomeStyleCalamares: false
+welcomeExpandingLogo: false
+windowExpanding: normal
+windowSize: 960px,640px
+windowPlacement: center
+sidebar: widget
+navigation: widget
+strings:
+  productName: DesOS
+  shortProductName: DesOS
+  version: 0.1.0 Preview 1
+  shortVersion: 0.1
+  versionedName: DesOS 0.1 Preview
+  shortVersionedName: DesOS 0.1
+  bootloaderEntryName: DesOS
+images:
+  productIcon: icon.svg
+  productLogo: icon.svg
+  productWelcome: welcome.svg
+style:
+  SidebarBackground: "#0a0e12"
+  SidebarText: "#8fa3b0"
+  SidebarTextCurrent: "#06080b"
+  SidebarBackgroundCurrent: "#4fd8ce"
+slideshow: show.qml
+slideshowAPI: 2
+uploadServer:
+  type: none

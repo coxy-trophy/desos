@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Install DesOS</title>
+  <rect x="7" y="7" width="114" height="114" rx="20" fill="#0a0e12" stroke="#1a232b" stroke-width="2"/>
+  <path d="M35 82v15h58V82" fill="none" stroke="#dce7ec" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M64 30v44m-17-16 17 18 17-18" fill="none" stroke="#4fd8ce" stroke-width="7" stroke-linecap="square" stroke-linejoin="miter"/>
+</svg>

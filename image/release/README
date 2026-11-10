@@ -1,0 +1,29 @@
+DesOS release identity
+=====================
+
+DesOS 0.1 Preview is a private preview distribution built from the Ubuntu 26.04
+(Resolute Raccoon) package base and Linux, with the DEs-UI native desktop.
+DesOS is a derivative project; Ubuntu, Debian, Linux, dpkg and their components
+retain their respective upstream authorship and licenses. This package supplies
+DesOS identity metadata, not a replacement for Ubuntu's essential base-files.
+
+Source: image/release_package.py and image/release/ in the DesOS build source.
+The build's public JSON record includes archive/payload SHA-256 hashes. No public
+download or support service is configured for this private preview.
+
+This package diverts /usr/lib/os-release and /etc/lsb-release to the corresponding
+.ubuntu paths before unpacking DesOS metadata. Later base-files updates write
+their upstream identity to those diverted paths; DesOS remains the active
+identity. /etc/os-release remains base-files' relative symlink into /usr/lib.
+Do not edit the .ubuntu backup files to change DesOS branding.
+
+Removal restores the preserved Ubuntu identity. Maintainer scripts refuse a
+different package's diversion, another vendor identity, an unclaimed .ubuntu
+backup, or a modified active identity during restoration. An administrator must
+resolve such a conflict explicitly; the package never discards it automatically.
+The release files are package payloads, not conffiles. The normal dpkg remove
+step removes them before postrm restores the diverted Ubuntu files.
+
+Maintainer scripts use dpkg's DPKG_ROOT and DPKG_ADMINDIR, allowing the same real
+diversion logic to be exercised in a disposable, unprivileged filesystem fixture.
+No host package installation is required for those tests.

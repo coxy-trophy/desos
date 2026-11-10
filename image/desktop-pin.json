@@ -1,0 +1,30 @@
+{
+  "source_repository": "https://github.com/coxy-trophy/des-ui",
+  "source_revision": "d462986a5100b0c75401b7710c7642efd32ee44f",
+  "version": "0.1.1",
+  "built_on": "Ubuntu 26.04.1 amd64",
+  "built_with": "Rust 1.93.1",
+  "previous_validation": "21 session tests, 6 CLI checks; native greeter/session/login/input/lock/unlock/reboot in standalone prototype",
+  "packages": [
+    {
+      "file": "des-ui-greeter_0.1.1_amd64.deb",
+      "sha256": "2a4724d5faf70f888f3ba6e7dc3c11402f6fbab8133eaaea2d7746595984343c",
+      "size": 4528
+    },
+    {
+      "file": "des-ui-music_0.1.1_amd64.deb",
+      "sha256": "598a3602ef3a67bafef3859296ef7375c371a62d12c3c8c3300b8abd038b406a",
+      "size": 3359644
+    },
+    {
+      "file": "des-ui-plymouth_0.1.1_amd64.deb",
+      "sha256": "1f83fa964c3cabd68d2f91b5f5a52cac2f6131451fd5445a288cda304e173535",
+      "size": 17452
+    },
+    {
+      "file": "des-ui_0.1.1_amd64.deb",
+      "sha256": "7e4098ffbd51b338586fb6c2ec65a413069f876be74dbb5e1df90d205b87afa7",
+      "size": 21483222
+    }
+  ]
+}

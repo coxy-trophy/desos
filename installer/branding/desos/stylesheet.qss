@@ -1,0 +1,65 @@
+/* Native Calamares owns widget behavior; DesOS supplies its matte palette. */
+QWidget {
+    background-color: #06080b;
+    color: #dce7ec;
+    font-family: "Chakra Petch", "Noto Sans", sans-serif;
+    font-size: 15px;
+    selection-background-color: #4fd8ce;
+    selection-color: #06080b;
+}
+#sidebarApp { background-color: #0a0e12; }
+QLabel { background-color: transparent; }
+QToolTip {
+    color: #dce7ec;
+    background-color: #141b22;
+    border: 1px solid #8fa3b0;
+    padding: 6px;
+}
+QPushButton, QComboBox {
+    background-color: #141b22;
+    border: 1px solid #31434f;
+    border-radius: 6px;
+    padding: 7px 14px;
+    min-height: 22px;
+}
+QPushButton:hover, QComboBox:hover { border-color: #8fa3b0; }
+QPushButton:focus, QComboBox:focus, QLineEdit:focus, QTextEdit:focus,
+QCheckBox:focus, QRadioButton:focus {
+    border: 2px solid #4fd8ce;
+}
+QPushButton:default { background-color: #4fd8ce; color: #06080b; border-color: #4fd8ce; }
+QPushButton:pressed { background-color: #254c4d; }
+QPushButton:default:pressed { background-color: #3bb7af; color: #06080b; }
+QPushButton:disabled, QComboBox:disabled { color: #8fa3b0; background-color: #0a0e12; border-color: #1a232b; }
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox {
+    background-color: #0a0e12;
+    border: 1px solid #31434f;
+    border-radius: 6px;
+    padding: 6px;
+}
+QAbstractItemView {
+    background-color: #0a0e12;
+    alternate-background-color: #141b22;
+    border: 1px solid #1a232b;
+    selection-background-color: #254c4d;
+    selection-color: #dce7ec;
+}
+QHeaderView::section { background-color: #141b22; padding: 6px; border: 1px solid #1a232b; }
+QCheckBox, QRadioButton { spacing: 8px; padding: 3px; border: 2px solid transparent; }
+QCheckBox:disabled { color: #8fa3b0; }
+/* greetd authentication is required in this preview. Keep the unavailable
+   upstream option visible and accessible, with an explicit explanation. */
+QCheckBox#checkBoxDoAutoLogin {
+    qproperty-enabled: false;
+    qproperty-text: "Automatic login (unavailable in this preview)";
+    qproperty-toolTip: "Sign in with your chosen password after installation.";
+}
+QGroupBox { border: 1px solid #1a232b; border-radius: 6px; margin-top: 12px; padding-top: 14px; }
+QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 5px; }
+QProgressBar { border: 1px solid #1a232b; border-radius: 4px; background-color: #141b22; text-align: center; min-height: 18px; }
+QProgressBar::chunk { background-color: #254c4d; }
+QScrollBar:vertical { background: #0a0e12; width: 14px; margin: 0; }
+QScrollBar::handle:vertical { background: #31434f; border-radius: 5px; min-height: 30px; margin: 2px; }
+QScrollBar::handle:vertical:hover { background: #8fa3b0; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }

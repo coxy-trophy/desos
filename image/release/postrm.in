@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+package=desos-release
+root=${DPKG_ROOT:-}
+admin=${DPKG_ADMINDIR:-${root}/var/lib/dpkg}
+case "$root" in ""|/*) ;; *) echo "$package: DPKG_ROOT must be absolute" >&2; exit 1 ;; esac
+
+divert() {
+    /usr/bin/dpkg-divert --admindir "$admin" --instdir "${root:-/}" "$@"
+}
+fail() { echo "$package: $*" >&2; exit 1; }
+
+case "${1:-}" in
+    remove|purge) ;;
+    abort-install) [ -z "${2:-}" ] || exit 0 ;;
+    *) exit 0 ;;
+esac
+
+# dpkg normally removes our non-conffile payloads before calling postrm. On a
+# failed fresh unpack, remove only an exact copy of this version's identity.
+# Refuse changed files rather than clobbering the administrator's new choice.
+for file in /usr/lib/os-release /etc/lsb-release; do
+    owner=$(divert --listpackage "$file")
+    [ -n "$owner" ] || continue
+    [ "$owner" = "$package" ] || fail "$file is now diverted by $owner; leaving it untouched"
+    [ "$(divert --truename "$file")" = "$file.ubuntu" ] || fail "$file has an unexpected diversion target"
+    [ ! -L "$root$file" ] || fail "$file is now a symlink; leaving it untouched"
+    if [ -e "$root$file" ]; then
+        [ -f "$root$file" ] || fail "$file is not a regular file"
+        case "$file" in
+            /usr/lib/os-release) expected=@OS_RELEASE_SHA256@ ;;
+            /etc/lsb-release) expected=@LSB_RELEASE_SHA256@ ;;
+        esac
+        actual=$(/usr/bin/sha256sum "$root$file")
+        actual=${actual%% *}
+        [ "$actual" = "$expected" ] || fail "$file was modified; preserve it and resolve the diversion manually"
+    fi
+done
+
+for file in /usr/lib/os-release /etc/lsb-release; do
+    if [ "$(divert --listpackage "$file")" = "$package" ]; then
+        if [ -f "$root$file" ]; then
+            /usr/bin/rm -- "$root$file"
+        fi
+        divert --package "$package" --remove --rename --divert "$file.ubuntu" "$file"
+    fi
+done

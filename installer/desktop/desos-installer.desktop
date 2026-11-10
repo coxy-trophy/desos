@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Install DesOS
+GenericName=Operating system installer
+Comment=Install DesOS on your computer
+Exec=/usr/bin/desos-installer
+TryExec=/usr/bin/desos-installer
+Icon=desos-installer
+Terminal=false
+Categories=System;
+Keywords=install;DesOS;system;disk;
+StartupNotify=true

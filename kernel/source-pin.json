@@ -1,0 +1,27 @@
+{
+  "archive_sha256": "490a7aedf1b355c565d3a6c05333ccccb5da82064eca46b590448a7099d7d651",
+  "fingerprint_document_sha256": "46f466dec298534c8e52ff295139f6f9314f25c2599e5573841216b759d5dec7",
+  "fingerprint_document_url": "https://www.kernel.org/signature.html",
+  "localversion": "-desos",
+  "maintainers": [
+    {
+      "email": "gregkh@kernel.org",
+      "fingerprint": "647F28654894E3BD457199BE38DBBDC86092693E",
+      "key_acquisition": "GnuPG WKD, gregkh@kernel.org over HTTPS",
+      "name": "Greg Kroah-Hartman",
+      "public_key_file": "gregkh.asc",
+      "public_key_sha256": "65142ac9e4c26d84b87b02f88b990c0d3013d4a1e0d7f656ad552a25c1c7167d"
+    }
+  ],
+  "package_version": "6.18.62-1desos1",
+  "pinned_on": "2026-11-10",
+  "release_date": "2026-11-06",
+  "release_metadata_snapshot_sha256": "f471fcd215cedcccbfd97aa1b2bb1e80af7b6b1dd775f0e0d9f14cb201a6fc6f",
+  "release_metadata_url": "https://www.kernel.org/releases.json",
+  "signature_sha256": "ecf7f222993adc3c82148f6ca30ec654be226fbdaf6e5cd953b2509953b6a8bd",
+  "signature_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.62.tar.sign",
+  "source_date_epoch": 1793989063,
+  "source_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.62.tar.xz",
+  "tar_sha256": "88e303726b8cb1e0537b4d8e0ed836998d975832d56bf96441cd87b46e1fbefc",
+  "version": "6.18.62"
+}

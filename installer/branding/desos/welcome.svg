@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="240" viewBox="0 0 560 240">
+  <title>DesOS 0.1 Preview — a desktop of your own</title>
+  <rect width="560" height="240" rx="10" fill="#0a0e12"/>
+  <path d="M32 39h36m-36 0v36M528 201h-36m36 0v-36" stroke="#4fd8ce" stroke-width="2" fill="none"/>
+  <text x="280" y="108" text-anchor="middle" font-family="Chakra Petch, sans-serif" font-size="61" font-weight="600" fill="#dce7ec">Des<tspan fill="#4fd8ce">OS</tspan></text>
+  <text x="280" y="143" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12" letter-spacing="2" fill="#8fa3b0">0.1 PREVIEW / DEs-UI DESKTOP</text>
+  <path d="M112 168h336" stroke="#1a232b"/>
+  <text x="280" y="193" text-anchor="middle" font-family="Chakra Petch, sans-serif" font-size="16" fill="#8fa3b0">Built on Linux and Ubuntu 26.04</text>
+</svg>

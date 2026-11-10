@@ -1,0 +1,9 @@
+#!/bin/sh
+# Pass only display connection hints; the privileged helper validates each one.
+if [ "$#" -ne 0 ]; then
+    echo "Usage: desos-installer" >&2
+    exit 64
+fi
+exec /usr/bin/pkexec /usr/libexec/desos-installer-helper \
+    --display "${DISPLAY-}" --wayland-display "${WAYLAND_DISPLAY-}" \
+    --xauthority "${XAUTHORITY-}"

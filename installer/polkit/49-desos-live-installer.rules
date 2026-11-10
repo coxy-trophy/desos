@@ -1,0 +1,7 @@
+// The helper independently checks live boot, source media and local sockets.
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.desos.installer.launch" &&
+        subject.user === "desos" && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});
