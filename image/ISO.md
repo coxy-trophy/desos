@@ -94,6 +94,9 @@ GRUB provides four explicit choices:
 
 Each entry uses `boot=casper live-media-path=casper username=desos
 hostname=desos-live nopersistent console=tty0 console=ttyS0,115200n8`.
+Try, Install and Compatibility also use `quiet splash` for the native Plymouth
+boot screen. Install differs from Try only by `desos.install=1`. Debug omits
+`quiet splash` and adds `debug loglevel=7 systemd.show_status=1`.
 GRUB also enables a 115200-baud serial terminal for QA. The rootfs owns graphical
 live autologin and the standard serial login/getty configuration. The recipe
 contains no automatic disk installation or wipe behavior.

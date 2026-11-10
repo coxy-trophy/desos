@@ -56,6 +56,24 @@ class IsoRecipeTests(unittest.TestCase):
             kernel = 'compat' if 'vmlinuz-compat' in entry else 'upstream'
             self.assertIn(f'initrd /casper/initrd-{kernel}', entry)
 
+    def test_normal_menu_entries_enable_plymouth_and_debug_stays_verbose(self):
+        entries = self.recipe.grub_menu().split('menuentry ')[1:]
+        arguments = []
+        for entry in entries:
+            linux = next(line.strip().split() for line in entry.splitlines() if line.strip().startswith('linux '))
+            arguments.append(linux)
+        self.assertEqual(len(arguments), 4)
+        for normal in arguments[:3]:
+            with self.subTest(entry=normal):
+                self.assertIn('quiet', normal)
+                self.assertIn('splash', normal)
+        debug = arguments[3]
+        self.assertNotIn('quiet', debug)
+        self.assertNotIn('splash', debug)
+        for token in ['debug', 'loglevel=7', 'systemd.show_status=1']:
+            self.assertIn(token, debug)
+        self.assertEqual(arguments[1], arguments[0] + ['desos.install=1'])
+
     def test_boot_payload_symlinks_are_refused_before_worker_namespace_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

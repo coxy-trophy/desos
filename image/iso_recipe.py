@@ -83,9 +83,9 @@ def select_kernels(root):
 def grub_menu():
     common = 'boot=casper live-media-path=casper username=desos hostname=desos-live nopersistent console=tty0 console=ttyS0,115200n8'
     entries = [
-        ('Try DesOS 0.1 Preview', 'upstream', ''),
-        ('Install DesOS 0.1 Preview', 'upstream', ' desos.install=1'),
-        ('Compatibility: Ubuntu kernel (recovery choice)', 'compat', ''),
+        ('Try DesOS 0.1 Preview', 'upstream', ' quiet splash'),
+        ('Install DesOS 0.1 Preview', 'upstream', ' quiet splash desos.install=1'),
+        ('Compatibility: Ubuntu kernel (recovery choice)', 'compat', ' quiet splash'),
         ('Debug DesOS upstream (verbose boot)', 'upstream', ' debug loglevel=7 systemd.show_status=1'),
     ]
     lines = ['set default=0', 'set timeout=8', 'insmod all_video',
