@@ -10,10 +10,14 @@ def pretty_name():
 
 
 def run():
-    spec = importlib.util.spec_from_file_location("desos_cleanup", Path(__file__).with_name("cleanup.py"))
-    cleanup = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cleanup)
     try:
+        # Calamares executes job scripts without a module __file__ value.
+        spec = importlib.util.spec_from_file_location(
+            "desos_cleanup", "/usr/lib/desos/calamares/modules/desoscleanup/cleanup.py"
+        )
+        cleanup = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cleanup)
+
         def target_command(args):
             # Calamares provides the chroot. env is fixed and never inherited
             # from the live account, avoiding an interactive apt frontend.

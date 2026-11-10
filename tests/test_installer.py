@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tomllib
 from types import SimpleNamespace
@@ -41,6 +42,29 @@ class CleanupTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_job_runs_in_calamares_embedded_namespace(self):
+        adapter = BASE / "modules/desoscleanup/main.py"
+        fixture = Path(self.temp.name) / "cleanup_fixture.py"
+        fixture.write_text(
+            'def cleanup_target(root, username, run):\n'
+            '    assert str(root) == "/tmp/calamares-test" and username == "alex"\n'
+            '    run(["/usr/bin/true"])\n'
+        )
+        spec = importlib.util.spec_from_file_location("cleanup_fixture", fixture)
+        commands = []
+        backend = SimpleNamespace(
+            globalstorage=SimpleNamespace(value={"rootMountPoint": "/tmp/calamares-test", "username": "alex"}.get),
+            utils=SimpleNamespace(check_target_env_call=commands.append, warning=self.fail),
+        )
+        namespace = {}
+        with patch.dict(sys.modules, {"libcalamares": backend}), \
+             patch.object(importlib.util, "spec_from_file_location", return_value=spec) as module_path:
+            exec(compile(adapter.read_text(), str(adapter), "exec"), namespace)
+            self.assertIsNone(namespace["run"]())
+        self.assertEqual(str(module_path.call_args.args[1]),
+                         "/usr/lib/desos/calamares/modules/desoscleanup/cleanup.py")
+        self.assertEqual(commands, [["/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "/usr/bin/true"]])
 
     def write(self, name, value):
         path = self.root / name
