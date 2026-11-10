@@ -98,7 +98,8 @@ included. Secure Boot and encrypted installation are not enabled in this preview
     put('etc/casper.conf', '''export USERNAME="desos"
 export USERFULLNAME="DesOS Live Session"
 export HOST="desos-live"
-export BUILD_SYSTEM="DesOS"
+# Casper uses this field to select the base system's modprobe options.
+export BUILD_SYSTEM="Ubuntu"
 export FLAVOUR="DesOS"
 ''')
     put('etc/initramfs-tools/conf.d/desos-live', 'CASPER_GENERATE_UUID=1\n')

@@ -16,12 +16,15 @@ class ImageConfigurationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_identity_and_live_account_are_desos(self):
+    def test_desos_identity_uses_ubuntu_casper_compatibility(self):
         write_configuration(self.root, self.parent)
         identity = (self.root / 'usr/share/desos/os-release').read_text()
+        casper = (self.root / 'etc/casper.conf').read_text()
         self.assertIn('ID=desos\n', identity)
         self.assertIn('ID_LIKE="ubuntu debian"', identity)
-        self.assertIn('USERNAME="desos"', (self.root / 'etc/casper.conf').read_text())
+        self.assertIn('USERNAME="desos"', casper)
+        self.assertIn('FLAVOUR="DesOS"', casper)
+        self.assertIn('BUILD_SYSTEM="Ubuntu"', casper)
         self.assertIn('initial_session', (self.root / 'etc/greetd/config.toml').read_text())
 
     def test_live_hooks_and_installed_kernel_preference_are_explicit(self):
