@@ -134,6 +134,25 @@ class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.helper = load("desos_helper", BASE / "bin/desos-installer-helper.py")
 
+    def test_launcher_finds_wayland_from_the_user_manager(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            pkexec = directory / "pkexec"
+            pkexec.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            systemctl = directory / "systemctl"
+            systemctl.write_text('#!/bin/sh\nprintf "DISPLAY=:0\\nWAYLAND_DISPLAY=wayland-1\\n"\n')
+            for stub in (pkexec, systemctl):
+                stub.chmod(0o755)
+            launcher = (BASE / "bin/desos-installer").read_text()
+            launcher = launcher.replace("/usr/bin/pkexec", str(pkexec))
+            launcher = launcher.replace("/usr/bin/systemctl", str(systemctl))
+            result = subprocess.run(
+                ["/bin/sh", "-c", launcher], env={"DISPLAY": ":0"},
+                text=True, capture_output=True, check=True,
+            )
+            args = result.stdout.splitlines()
+            self.assertEqual(args[args.index("--wayland-display") + 1], "wayland-1")
+
     def test_requires_live_casper_boot_and_real_media(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

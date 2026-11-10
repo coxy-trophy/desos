@@ -4,6 +4,11 @@ if [ "$#" -ne 0 ]; then
     echo "Usage: desos-installer" >&2
     exit 64
 fi
+wayland_display=${WAYLAND_DISPLAY-}
+if [ -z "$wayland_display" ]; then
+    wayland_display=$(/usr/bin/systemctl --user show-environment 2>/dev/null |
+        /usr/bin/sed -n 's/^WAYLAND_DISPLAY=//p')
+fi
 exec /usr/bin/pkexec /usr/libexec/desos-installer-helper \
-    --display "${DISPLAY-}" --wayland-display "${WAYLAND_DISPLAY-}" \
+    --display "${DISPLAY-}" --wayland-display "$wayland_display" \
     --xauthority "${XAUTHORITY-}"

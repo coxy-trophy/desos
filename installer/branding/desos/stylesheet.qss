@@ -45,6 +45,8 @@ QAbstractItemView {
     selection-color: #dce7ec;
 }
 QHeaderView::section { background-color: #141b22; padding: 6px; border: 1px solid #1a232b; }
+/* Calamares paints partition names in black inside this view. */
+PartitionLabelsView { background-color: #f4f7fa; }
 QCheckBox, QRadioButton { spacing: 8px; padding: 3px; border: 2px solid transparent; }
 QCheckBox:disabled { color: #8fa3b0; }
 /* greetd authentication is required in this preview. Keep the unavailable
