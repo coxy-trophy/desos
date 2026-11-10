@@ -15,6 +15,14 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 
 
+def build_jobs(value):
+    if value is None:
+        return 2
+    if value not in {'1', '2', '3', '4'}:
+        raise ValueError('DESOS_BUILD_JOBS must be one integer from 1 through 4')
+    return int(value)
+
+
 def digest(path):
     with open(path, 'rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -278,13 +286,24 @@ def verify(work, pin):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['fetch', 'verify', 'extract', 'configure', 'check-config', 'verify-tree', 'provenance', 'check-packages'])
-    parser.add_argument('--work', type=Path, required=True)
+    parser.add_argument('action', choices=['fetch', 'verify', 'extract', 'configure', 'check-config', 'verify-tree', 'provenance', 'check-packages', 'build-jobs'])
+    parser.add_argument('--work', type=Path)
     parser.add_argument('--source', type=Path)
     parser.add_argument('--build', type=Path)
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--packages', type=Path)
+    parser.add_argument('--build-jobs', help='Explicit provenance job count, otherwise DESOS_BUILD_JOBS or 2')
     args = parser.parse_args()
+    if args.action in {'build-jobs', 'provenance'}:
+        try:
+            jobs = build_jobs(args.build_jobs if args.build_jobs is not None else os.environ.get('DESOS_BUILD_JOBS'))
+        except ValueError as error:
+            parser.error(str(error))
+    if args.action == 'build-jobs':
+        print(jobs)
+        return
+    if not args.work:
+        parser.error('--work required')
     pin = json.loads((HERE / 'source-pin.json').read_text())
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -324,7 +343,7 @@ def main():
         evidence.update({'package_version': pin['package_version'], 'kernel_release': (build / 'include/config/kernel.release').read_text().strip(),
                          'config_sha256': digest(build / '.config'), 'baseline_config_sha256': digest(args.baseline),
                          'source_date_epoch': pin['source_date_epoch'], 'build_user': 'desos', 'build_host': 'desos-builder',
-                         'build_jobs': 2, 'config_recipe_sha256': digest(HERE / 'kernel_tools.py'),
+                         'build_jobs': jobs, 'config_recipe_sha256': digest(HERE / 'kernel_tools.py'),
                          'build_script_sha256': digest(HERE / 'build-guest.sh'),
                          'packages': {p.name: digest(p) for p in sorted(args.packages.glob('*.deb'))},
                          'toolchain': {tool: subprocess.run([tool, '--version'], capture_output=True, text=True, check=True).stdout.splitlines()[0] for tool in ['gcc', 'ld', 'make', 'dpkg-deb']}})

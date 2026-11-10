@@ -5,6 +5,9 @@ if [[ ${1:-} != --guest-build || $# != 3 ]]; then
     echo 'Usage: build-guest.sh --guest-build /absolute/work/directory /absolute/baseline.config' >&2
     exit 2
 fi
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+jobs=$(python3 "$here/kernel_tools.py" build-jobs)
+export DESOS_BUILD_JOBS="$jobs"
 if ! systemd-detect-virt --vm --quiet; then
     echo 'Refusing kernel compilation outside a detected virtual machine' >&2
     exit 2
@@ -24,7 +27,6 @@ fi
 for tool in python3 gpg make gcc ld flex bison dpkg-deb dpkg-buildpackage fakeroot rsync bc pahole; do
     command -v "$tool" >/dev/null || { echo "Missing guest build dependency: $tool" >&2; exit 2; }
 done
-here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 mkdir -p "$work"
 work=$(realpath "$work")
 baseline=$(realpath "$baseline")
@@ -35,6 +37,7 @@ if [[ $work == *' '* ]]; then
     echo 'Kernel build work path must not contain spaces' >&2
     exit 2
 fi
+printf 'DesOS kernel build jobs: %s\n' "$jobs"
 python3 "$here/kernel_tools.py" fetch --work "$work"
 python3 "$here/kernel_tools.py" extract --work "$work"
 # Freeze the original baseline independently of /boot and avoid copying accounts.
@@ -49,7 +52,7 @@ export ARCH=x86_64 KBUILD_BUILD_USER=desos KBUILD_BUILD_HOST=desos-builder
 export SOURCE_DATE_EPOCH=1793989063 KBUILD_BUILD_VERSION=1
 export KBUILD_BUILD_TIMESTAMP='Fri Nov  6 18:17:43 UTC 2026'
 export KDEB_PKGVERSION=6.18.62-1desos1 KDEB_CHANGELOG_DIST=desos
-export DEB_BUILD_OPTIONS='parallel=2'
+export DEB_BUILD_OPTIONS="parallel=$jobs"
 export LC_ALL=C TZ=UTC
 python3 "$here/kernel_tools.py" configure --work "$work" --baseline "$work/baseline.config"
 release=$(make --silent -C "$source_dir" O="$build_dir" kernelrelease)
@@ -59,7 +62,7 @@ if [[ $release != 6.18.62-desos ]]; then
 fi
 # No sudo, make install, dpkg -i, source edits, or host boot changes.
 # Upstream bindeb-pkg emits .deb next to O=; strip debug data from modules.
-make -C "$source_dir" O="$build_dir" -j2 LOCALVERSION= INSTALL_MOD_STRIP=1 bindeb-pkg
+make -C "$source_dir" O="$build_dir" -j"$jobs" LOCALVERSION= INSTALL_MOD_STRIP=1 bindeb-pkg
 python3 "$here/kernel_tools.py" check-config --work "$work"
 python3 "$here/kernel_tools.py" verify-tree --work "$work"
 mkdir -p "$packages"
@@ -83,6 +86,6 @@ if (( ${#image[@]} != 1 || ${#headers[@]} != 1 )); then
     echo 'Expected exactly one DesOS linux-image and linux-headers package' >&2
     exit 1
 fi
-python3 "$here/kernel_tools.py" provenance --work "$work" --baseline "$work/baseline.config" --packages "$packages"
+python3 "$here/kernel_tools.py" provenance --work "$work" --baseline "$work/baseline.config" --packages "$packages" --build-jobs "$jobs"
 (cd "$packages" && sha256sum -- *.deb config-* baseline.config source-pin.json signature-status.txt signature-log.txt kernel-provenance.json > SHA256SUMS)
 printf 'Kernel packages and public provenance: %s\n' "$packages"

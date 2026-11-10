@@ -44,7 +44,7 @@ explicitly repin and verify the upstream status and maintainer fingerprint.
 
 ## Worker setup and commands
 
-Use an isolated Ubuntu x86-64 worker with two build jobs, around 5 GiB RAM plus
+Use an isolated Ubuntu x86-64 worker with two build jobs by default, around 5 GiB RAM plus
 swap, and at least 25 GiB free (a full inherited generic config can require more).
 Provision ordinary Ubuntu package dependencies in the worker, never the host:
 
@@ -69,7 +69,25 @@ The baseline is mandatory; there is no `localmodconfig` or host-config fallback.
 The script freezes its original baseline, configures via upstream
 `scripts/config` and `olddefconfig`, and checks the final effective config.
 An existing valid build config is preserved to resume an interrupted build;
-use a new work directory after changing the baseline or recipe.
+use a new work directory after changing the baseline or compiler/config recipe.
+The concurrency-only `DESOS_BUILD_JOBS` setting accepts exactly **1, 2, 3 or 4**;
+unset defaults to 2 and invalid/empty values fail before work begins. It controls
+both outer make and Debian's nested make via `DEB_BUILD_OPTIONS`, and the final
+invocation's actual bounded count is written as `build_jobs` in provenance.
+
+```sh
+DESOS_BUILD_JOBS=4 bash /opt/desos-build/recipe/kernel/build-guest.sh --guest-build \
+  /opt/desos-build/kernel /opt/desos-build/kernel/baseline.config
+```
+
+To increase concurrency, first gracefully stop the active build and wait until
+all old make/compiler processes have exited. Then resume the same work directory
+with the unchanged source, baseline, `.config`, toolchain and build identity.
+Do not clean the build or run two make trees against one `O=` directory. Kbuild
+tracks completed objects/commands and deletes interrupted outputs; changing job
+slots alone does not change compiler flags or require a clean rebuild. Record
+any earlier concurrency separately in the parent build audit: the final field
+records the resumed invocation, not a claim that every object used that count.
 
 Rootless preparatory commands are also available without invoking compilation:
 
@@ -85,7 +103,7 @@ python3 -m unittest discover -s tests -p 'test_kernel*.py' -v
 signed tar. `verify-tree` repeats that comparison and rejects extra source files.
 The kernel source is never patched. All generated build products go to `O=build`.
 The recipe uses upstream `bindeb-pkg`, fixed release timestamp/build identity,
-`-j2`, and `INSTALL_MOD_STRIP=1`. Source, full baseline, final config, toolchain
+`-j${DESOS_BUILD_JOBS:-2}` bounded to four, and `INSTALL_MOD_STRIP=1`. Source, full baseline, final config, toolchain
 versions and package hashes make the build inspectable and repeatable. The generated module
 signing key also makes independent fresh builds differ byte for byte. Bitwise
 identity across different toolchain versions or fresh signing keys is not claimed; provenance captures

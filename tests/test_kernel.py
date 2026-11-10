@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -73,6 +74,40 @@ class KernelContract(unittest.TestCase):
                               ('usr/lib/hidden', b'-----BEGIN PRIVATE KEY-----\nprivate')]:
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'private'):
                 self.mod.check_package_tar(payload(name, content))
+
+    def test_build_jobs_are_bounded_and_default_to_two(self):
+        self.assertEqual(self.mod.build_jobs(None), 2)
+        for value in ['1', '2', '3', '4']:
+            self.assertEqual(self.mod.build_jobs(value), int(value))
+        for value in ['', '0', '5', '-1', '04', ' 4', '4 ', '2;true', '999999']:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.mod.build_jobs(value)
+
+    def test_invalid_build_jobs_refuse_before_guest_or_work_actions(self):
+        environment = dict(os.environ, DESOS_BUILD_JOBS='5')
+        result = subprocess.run(['bash', str(ROOT / 'kernel/build-guest.sh'), '--guest-build', '/must/not/be/created', '/missing/baseline'], env=environment, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('DESOS_BUILD_JOBS', result.stderr)
+        self.assertFalse(pathlib.Path('/must/not/be/created').exists())
+
+    def test_provenance_records_the_explicit_build_jobs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            build = work / 'build'
+            (build / 'include/config').mkdir(parents=True)
+            config = '\n'.join(f'CONFIG_{key}={value}' for key, value in self.mod.required_config().items()) + '\n'
+            (build / '.config').write_text(config)
+            (build / 'include/config/kernel.release').write_text('6.18.62-desos\n')
+            (work / 'baseline.config').write_text(config)
+            (work / 'source-provenance.json').write_text('{"version":"6.18.62"}')
+            for name in ('signature-status.txt', 'signature-log.txt'):
+                (work / name).write_text('public test fixture\n')
+            packages = work / 'packages'
+            packages.mkdir()
+            result = subprocess.run(['python3', str(ROOT / 'kernel/kernel_tools.py'), 'provenance', '--work', str(work), '--baseline', str(work / 'baseline.config'), '--packages', str(packages), '--build-jobs', '4'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads((packages / 'kernel-provenance.json').read_text())
+            self.assertEqual(evidence['build_jobs'], 4)
 
     def test_build_refuses_without_guest_opt_in(self):
         result = subprocess.run(['bash', str(ROOT / 'kernel/build-guest.sh')], capture_output=True, text=True)
