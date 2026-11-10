@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -11,6 +12,13 @@ from unittest.mock import patch
 import yaml
 
 BASE = Path(__file__).resolve().parents[1] / "installer"
+# Observed in the pinned Ubuntu 26.04 greetd package's
+# /usr/lib/systemd/system/greetd.service; this is the service's VT contract,
+# not a complete replacement unit. It excludes tty7, rather than tty1.
+UBUNTU_GREETD_UNIT_VT_CONTRACT = """[Unit]
+After=getty@tty7.service
+Conflicts=getty@tty7.service
+"""
 
 
 def load(name, path):
@@ -109,6 +117,17 @@ class CleanupTests(unittest.TestCase):
             path.write_text(path.read_text().replace("alex:", "mydesos:"))
         self.clean("mydesos")
         self.assertIn("mydesos:", (self.root / "etc/passwd").read_text())
+
+    def test_installed_greetd_vt_matches_pinned_service_getty_conflict(self):
+        self.write("usr/lib/systemd/system/greetd.service", UBUNTU_GREETD_UNIT_VT_CONTRACT)
+        self.clean()
+        service = (self.root / "usr/lib/systemd/system/greetd.service").read_text()
+        excluded_getty = next(line.split("=", 1)[1] for line in service.splitlines() if line.startswith("Conflicts="))
+        configuration = tomllib.loads((self.root / "etc/greetd/config.toml").read_text())
+        configured_getty = f"getty@tty{configuration['terminal']['vt']}.service"
+        self.assertIn(configured_getty, excluded_getty.split())
+        self.assertNotIn("initial_session", configuration)
+        self.assertEqual(configuration["default_session"]["command"], "/usr/bin/des-ui-greeter")
 
 
 class LauncherTests(unittest.TestCase):

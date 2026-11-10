@@ -51,6 +51,7 @@ done
 chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends "${debs[@]}"
 python3 "$here/configure.py" --root "$root"
 bash "$recipes/installer/install-into-rootfs.sh" "$root"
+chroot "$root" install -d -o _greetd -g _greetd -m 755 /var/lib/des-ui/greeter
 chroot "$root" locale-gen en_US.UTF-8
 printf 'LANG=en_US.UTF-8\n' > "$root/etc/default/locale"
 printf 'Africa/Accra\n' > "$root/etc/timezone"

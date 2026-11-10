@@ -11,8 +11,9 @@ import shutil
 
 
 GREETD_CONFIG = '''# DesOS installed session: authenticate through the graphical greeter.
+# Ubuntu 26.04 greetd.service conflicts with getty@tty7.service.
 [terminal]
-vt = 1
+vt = 7
 
 [default_session]
 command = "/usr/bin/des-ui-greeter"

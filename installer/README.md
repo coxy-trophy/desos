@@ -41,7 +41,9 @@ The build supplies:
   by the image recipe). The live greetd configuration has an `initial_session`
   running `/usr/lib/desos/live-session` as `desos`; this wrapper normally execs
   `/usr/bin/des-ui-session`. Installed greetd uses the normal
-  `/usr/bin/des-ui-greeter` running as `_greetd`.
+  `/usr/bin/des-ui-greeter` running as `_greetd` on VT 7, matching the pinned
+  Ubuntu greetd unit's `Conflicts=getty@tty7.service`. This avoids competing with
+  the ordinary getty on VT 1.
 - The original source image at `/cdrom/casper/filesystem.squashfs`, mounted by
   Casper. The boot command line must contain the exact `boot=casper` token.
 

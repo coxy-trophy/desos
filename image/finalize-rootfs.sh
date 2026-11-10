@@ -42,6 +42,7 @@ chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recomm
 # Reapply the final reviewed integration after every component is present.
 python3 "$here/configure.py" --root "$root"
 bash "$recipes/installer/install-into-rootfs.sh" "$root"
+chroot "$root" install -d -o _greetd -g _greetd -m 755 /var/lib/des-ui/greeter
 chroot "$root" systemctl set-default graphical.target
 chroot "$root" systemctl enable greetd NetworkManager systemd-resolved systemd-timesyncd bluetooth
 mkdir -p "$root/usr/share/doc/desos/build"
