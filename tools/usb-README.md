@@ -51,7 +51,7 @@ evidence. The current operator-recorded image is:
 `ubuntu@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c`.
 The helper refuses tag-only or nonofficial image names and uses `--pull=never`.
 The Docker daemon and locally stored image are part of the trusted host.
-The pinned image supplies GNU coreutils 9.5 as `/usr/bin/gnudd`; its default
+The pinned image supplies GNU coreutils 9.7 as `/usr/bin/gnudd`; its default
 `dd` is uutils 0.10.0. The helper explicitly checks the GNU version banner before
 any device access and uses `/usr/bin/gnudd` for both writing and direct readback.
 An absent or unexpected GNU implementation fails at the `tools` stage without
