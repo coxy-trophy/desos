@@ -1,0 +1,10 @@
+[Unit]
+Description=DesOS undo: delete snapshots beyond the retention policy
+ConditionKernelCommandLine=!boot=casper
+ConditionPathIsMountPoint=/.snapshots
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/desos-undo prune
+Nice=10
+IOSchedulingClass=idle

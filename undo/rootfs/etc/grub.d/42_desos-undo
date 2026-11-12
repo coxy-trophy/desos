@@ -1,0 +1,13 @@
+#!/bin/sh
+# DesOS undo: boot-attempt counter, automatic recovery and the snapshot menu.
+# Never fails grub-mkconfig: a broken generator only omits this section.
+set -e
+tool=/usr/sbin/desos-undo
+if [ ! -x "$tool" ]; then
+    exit 0
+fi
+if fragment=$("$tool" grub-fragment 2>/dev/null); then
+    printf '%s\n' "$fragment"
+else
+    echo '# desos-undo: the boot section could not be generated; self-healing boot is inactive'
+fi

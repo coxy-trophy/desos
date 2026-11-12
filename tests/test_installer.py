@@ -64,7 +64,7 @@ class CleanupTests(unittest.TestCase):
             self.assertIsNone(namespace["run"]())
         self.assertEqual(str(module_path.call_args.args[1]),
                          "/usr/lib/desos/calamares/modules/desoscleanup/cleanup.py")
-        self.assertEqual(commands, [["/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "/usr/bin/true"]])
+        self.assertEqual(commands, [["/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "DESOS_UNDO_DISABLE=1", "/usr/bin/true"]])
 
     def write(self, name, value):
         path = self.root / name
@@ -240,6 +240,9 @@ class ConfigurationTests(unittest.TestCase):
         partition = yaml.safe_load((BASE / "calamares/modules/partition.conf").read_text())
         self.assertEqual(partition["initialPartitioningChoice"], "none")
         self.assertFalse(partition["enableLuksAutomatedPartitioning"])
+        # btrfs by default for desos-undo; ext4 stays selectable (tests/test_undo_installer.py).
+        self.assertEqual(partition["defaultFileSystemType"], "btrfs")
+        self.assertIn("ext4", partition["availableFileSystemTypes"])
         users = yaml.safe_load((BASE / "calamares/modules/users.conf").read_text())
         self.assertIn("desos", users["user"]["forbidden_names"])
         self.assertFalse(users["doAutologin"])

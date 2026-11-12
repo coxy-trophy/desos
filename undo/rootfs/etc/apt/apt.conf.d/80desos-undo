@@ -1,0 +1,7 @@
+// DesOS undo: a snapshot before and after every apt transaction.
+// The hooks never fail a transaction and do nothing in the live session or
+// on a non-btrfs system. The Tools::Options key must equal the first word
+// of the Pre-Install-Pkgs command.
+DPkg::Pre-Install-Pkgs { "/usr/sbin/desos-undo apt-pre || true"; };
+DPkg::Tools::Options::/usr/sbin/desos-undo::Version "3";
+DPkg::Post-Invoke { "/usr/sbin/desos-undo apt-post || true"; };

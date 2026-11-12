@@ -1,0 +1,15 @@
+{
+  "name": "undo",
+  "packages": [
+    "btrfs-progs",
+    "grub-common",
+    "python3",
+    "util-linux"
+  ],
+  "enable_units": [
+    "desos-undo-boot-start.service",
+    "desos-undo-boot-good.service",
+    "desos-undo-prune.timer"
+  ],
+  "notes": "btrfs snapshots around every apt/dpkg transaction, rollback, and self-healing boot (desos-undo). Inactive, with a clear message, in the live session and on non-btrfs installs. /etc/grub.d/42_desos-undo must stay executable; the installer must create the @ and @snapshots subvolumes (installer/calamares/modules/mount.conf). No package may own /.snapshots. See undo/README.md."
+}

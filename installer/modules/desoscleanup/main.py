@@ -22,7 +22,7 @@ def run():
             # Calamares provides the chroot. env is fixed and never inherited
             # from the live account, avoiding an interactive apt frontend.
             libcalamares.utils.check_target_env_call([
-                "/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", *args
+                "/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "DESOS_UNDO_DISABLE=1", *args
             ])
 
         cleanup.cleanup_target(

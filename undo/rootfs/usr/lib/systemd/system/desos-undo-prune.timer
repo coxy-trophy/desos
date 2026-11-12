@@ -1,0 +1,11 @@
+[Unit]
+Description=DesOS undo: daily snapshot cleanup
+ConditionKernelCommandLine=!boot=casper
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=1d
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

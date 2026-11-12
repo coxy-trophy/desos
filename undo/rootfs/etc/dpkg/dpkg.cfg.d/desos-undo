@@ -1,0 +1,4 @@
+# DesOS undo: snapshots around direct dpkg use. apt transactions are already
+# bracketed by /etc/apt/apt.conf.d/80desos-undo; these hooks then do nothing.
+pre-invoke=if [ -x /usr/sbin/desos-undo ]; then /usr/sbin/desos-undo dpkg-pre || true; fi
+post-invoke=if [ -x /usr/sbin/desos-undo ]; then /usr/sbin/desos-undo dpkg-post || true; fi

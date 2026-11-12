@@ -1,0 +1,16 @@
+[Unit]
+Description=DesOS undo: mark this start good once the sign-in screen is up
+After=greetd.service systemd-user-sessions.service desos-undo-boot-start.service
+ConditionKernelCommandLine=!boot=casper
+ConditionPathIsMountPoint=/.snapshots
+
+[Service]
+# Not oneshot: multi-user.target must not wait for the greeter check.
+Type=exec
+ExecStart=/usr/sbin/desos-undo boot-good --wait
+Restart=no
+TimeoutStartSec=30
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

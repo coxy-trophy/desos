@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+"""Snapshots, rollback and self-healing boot for DesOS. See desos-undo --help."""
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, '/usr/lib/desos-undo')
+
+import desos_undo  # noqa: E402
+
+sys.exit(desos_undo.main())

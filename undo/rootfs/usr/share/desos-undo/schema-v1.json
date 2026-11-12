@@ -1,0 +1,829 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://desos.invalid/schemas/desos-undo/v1",
+  "title": "desos-undo --json output, schema 1",
+  "description": "Every command prints exactly one object of this shape as the last line of standard output. Fields are only ever added within schema 1; a removal or change of meaning increments \"schema\".",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "ok",
+    "supported",
+    "code",
+    "message",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "command": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "The command did what was asked. False with supported=false means nothing was done because undo is unavailable here."
+    },
+    "supported": {
+      "type": "boolean",
+      "description": "False in the live session, on a non-btrfs root or on a foreign btrfs layout."
+    },
+    "code": {
+      "description": "Machine-readable reason when ok or supported is false.",
+      "enum": [
+        null,
+        "live-session",
+        "not-btrfs",
+        "layout-unsupported",
+        "tools-missing",
+        "snapshot-boot",
+        "restart-pending",
+        "not-root",
+        "no-such-snapshot",
+        "command-failed",
+        "not-ready",
+        "no-snapshot",
+        "usage",
+        "env-overflow",
+        "error"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "description": "One human-readable sentence or paragraph, suitable for showing to the user."
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "diff"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "from",
+              "to",
+              "paths",
+              "packages",
+              "files"
+            ],
+            "properties": {
+              "from": {
+                "type": "integer"
+              },
+              "to": {
+                "anyOf": [
+                  {
+                    "const": "current"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "packages": {
+                "$ref": "#/$defs/packages"
+              },
+              "files": {
+                "type": "object",
+                "required": [
+                  "added",
+                  "removed",
+                  "modified",
+                  "truncated"
+                ],
+                "properties": {
+                  "added": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "removed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "modified": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "list"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "snapshots"
+            ],
+            "properties": {
+              "snapshots": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/snapshot"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "notices"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "notices"
+            ],
+            "properties": {
+              "notices": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/notice"
+                }
+              },
+              "acknowledged": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "prune"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "deleted",
+              "failed",
+              "dry_run",
+              "reasons",
+              "kept"
+            ],
+            "properties": {
+              "deleted": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "failed": {
+                "type": "array"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "reasons": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "kept": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "rollback"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "rollback",
+              "restart_required"
+            ],
+            "properties": {
+              "rollback": {
+                "$ref": "#/$defs/rollback"
+              },
+              "restart_required": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "run"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "exit_code",
+              "command",
+              "pre_id",
+              "post_id",
+              "packages"
+            ],
+            "properties": {
+              "exit_code": {
+                "type": "integer"
+              },
+              "command": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "pre_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "post_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "packages": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/packages"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "snapshot"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "snapshot"
+            ],
+            "properties": {
+              "snapshot": {
+                "$ref": "#/$defs/snapshot"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "status"
+          },
+          "ok": {
+            "const": true
+          },
+          "supported": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "live",
+              "root",
+              "snapshots",
+              "boot",
+              "rollback",
+              "transaction",
+              "notices",
+              "retention"
+            ],
+            "properties": {
+              "live": {
+                "type": "boolean"
+              },
+              "root": {
+                "type": "object",
+                "required": [
+                  "fstype",
+                  "uuid",
+                  "subvolume",
+                  "booted_snapshot",
+                  "restart_pending"
+                ],
+                "properties": {
+                  "fstype": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "uuid": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "subvolume": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "booted_snapshot": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Set when the machine was started read-only from a snapshot."
+                  },
+                  "restart_pending": {
+                    "type": "boolean",
+                    "description": "A rollback was made and the old system is still running."
+                  }
+                }
+              },
+              "snapshots": {
+                "type": "object",
+                "required": [
+                  "count",
+                  "newest"
+                ],
+                "properties": {
+                  "count": {
+                    "type": "integer"
+                  },
+                  "newest": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "boot": {
+                "type": "object",
+                "required": [
+                  "mode",
+                  "threshold",
+                  "env",
+                  "tries",
+                  "good_id",
+                  "healed_id",
+                  "marked_good"
+                ],
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "grub-counted",
+                      "userspace-counted",
+                      "unarmed",
+                      "disabled"
+                    ],
+                    "description": "grub-counted: GRUB increments the counter on the EFI system partition. userspace-counted: no GRUB-writable filesystem, an early boot unit counts. unarmed: grub.cfg has no desos-undo section yet (run update-grub). disabled: undo unsupported here."
+                  },
+                  "threshold": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "env": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "tries": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Starts since the last good one; null if unreadable (the EFI partition is root-only)."
+                  },
+                  "good_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "healed_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "marked_good": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "rollback": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/rollback"
+                  }
+                ]
+              },
+              "transaction": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "notices": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/notice"
+                }
+              },
+              "retention": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "packageChange": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      }
+    },
+    "packages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installed",
+        "removed",
+        "upgraded",
+        "downgraded"
+      ],
+      "properties": {
+        "installed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/packageChange"
+          }
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/packageChange"
+          }
+        },
+        "upgraded": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/packageChange"
+          }
+        },
+        "downgraded": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/packageChange"
+          }
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "schema",
+        "id",
+        "kind",
+        "reason",
+        "created"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": [
+            "pre",
+            "post",
+            "manual",
+            "boot-good",
+            "rollback",
+            "unknown"
+          ],
+          "description": "pre/post: before/after a transaction (apt, dpkg, desos-undo run). manual: desos-undo snapshot. boot-good: taken when a start reached the sign-in screen. rollback: the state replaced by a rollback (its undo point)."
+        },
+        "reason": {
+          "type": "string"
+        },
+        "created": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel": {
+          "type": "string",
+          "description": "uname -r when taken"
+        },
+        "boot": {
+          "type": "object",
+          "properties": {
+            "kernels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "pre_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "post_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "packages": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/packages"
+            }
+          ],
+          "description": "Actual dpkg database difference between the pre snapshot and the system afterwards."
+        },
+        "planned": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/packages"
+            }
+          ],
+          "description": "What apt announced before the transaction (pre snapshots of apt only)."
+        },
+        "protected": {
+          "type": "boolean"
+        },
+        "rolled_back_to": {
+          "type": "integer"
+        },
+        "automatic": {
+          "type": "boolean"
+        }
+      }
+    },
+    "notice": {
+      "type": "object",
+      "required": [
+        "id",
+        "time",
+        "kind",
+        "message",
+        "acknowledged"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "time": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "auto-recovery",
+            "rollback"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "acknowledged": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "undo": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "required": [
+        "target",
+        "undo",
+        "time",
+        "reason",
+        "automatic"
+      ],
+      "properties": {
+        "target": {
+          "type": "integer"
+        },
+        "undo": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "time": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "automatic": {
+          "type": "boolean"
+        },
+        "grub_modules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
