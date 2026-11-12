@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <title>Language</title>
+  <path fill="none" stroke="#8fa3b0" stroke-width="2.5" d="M41 24C41 33.39 33.39 41 24 41C14.61 41 7 33.39 7 24C7 14.61 14.61 7 24 7C33.39 7 41 14.61 41 24Z"/>
+  <path fill="none" stroke="#8fa3b0" stroke-width="2.5" d="M31.5 24C31.5 33.39 28.14 41 24 41C19.86 41 16.5 33.39 16.5 24C16.5 14.61 19.86 7 24 7C28.14 7 31.5 14.61 31.5 24Z"/>
+  <path fill="none" stroke="#8fa3b0" stroke-width="2.5" d="M7 24L41 24"/>
+  <path fill="none" stroke="#8fa3b0" stroke-width="2" d="M10.5 15L37.5 15"/>
+  <path fill="none" stroke="#8fa3b0" stroke-width="2" d="M10.5 33L37.5 33"/>
+</svg>
