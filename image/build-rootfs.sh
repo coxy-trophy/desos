@@ -40,7 +40,15 @@ mount --make-rslave "$root/dev"
 export DEBIAN_FRONTEND=noninteractive
 chroot "$root" apt-get -o DPkg::Lock::Timeout=300 update
 mapfile -t packages < <(grep -Ev '^\s*(#|$)' "$here/packages.list")
-chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends "${packages[@]}"
+# Reviewed component trees (system/, undo/, ...) add their own packages/units.
+# Plain assignments, so a refused component.json stops the build here.
+component_packages=$(python3 "$here/components.py" packages --recipes "$recipes")
+component_units=$(python3 "$here/components.py" units --recipes "$recipes")
+[[ -z $component_packages ]] || mapfile -t -O "${#packages[@]}" packages <<< "$component_packages"
+units=()
+[[ -z $component_units ]] || mapfile -t units <<< "$component_units"
+chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${packages[@]}"
 mkdir -p "$root/tmp/desos-packages"
 cp "$inputs"/desktop/*.deb "$inputs"/release/*.deb "$root/tmp/desos-packages/"
 debs=()
@@ -51,6 +59,9 @@ done
 chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends "${debs[@]}"
 python3 "$here/configure.py" --root "$root"
 bash "$recipes/installer/install-into-rootfs.sh" "$root"
+# Component files go in only after every package is installed, so they are
+# never replaced by a package's own default configuration.
+python3 "$here/components.py" install --recipes "$recipes" --root "$root"
 chroot "$root" install -d -o _greetd -g _greetd -m 755 /var/lib/des-ui/greeter
 chroot "$root" locale-gen en_US.UTF-8
 printf 'LANG=en_US.UTF-8\n' > "$root/etc/default/locale"
@@ -58,6 +69,7 @@ printf 'Africa/Accra\n' > "$root/etc/timezone"
 ln -sfn /usr/share/zoneinfo/Africa/Accra "$root/etc/localtime"
 chroot "$root" systemctl set-default graphical.target
 chroot "$root" systemctl enable greetd NetworkManager systemd-resolved systemd-timesyncd bluetooth
+if (( ${#units[@]} )); then chroot "$root" systemctl enable "${units[@]}"; fi
 # No SSH daemon or build/development accounts are part of the live image.
 chroot "$root" dpkg-query -W -f='${Package} ${Version}\n' > /srv/desos-build/rootfs-package-manifest.txt
 touch "$root/.desos-packages-complete"

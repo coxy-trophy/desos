@@ -9,15 +9,34 @@ try:
 except ImportError:
     from paths import validate_rootfs
 
-IDENTITY = '''NAME=DesOS
-PRETTY_NAME="DesOS 0.1 Preview"
-ID=desos
-ID_LIKE="ubuntu debian"
-VERSION="0.1 Preview"
-VERSION_ID="0.1.0-preview1"
-VERSION_CODENAME=resolute
-UBUNTU_CODENAME=resolute
-HOME_URL="https://github.com/coxy-trophy/des-ui"
+# The release identity (/usr/lib/os-release, /etc/lsb-release) is owned solely
+# by the desos-release package built from image/release_package.py.
+
+# The single definition of the DesOS network update repository. Nothing is
+# published yet: the reserved .invalid name can never resolve, the source is
+# shipped disabled, and desos-update-channel refuses to enable a placeholder.
+UPDATE_CHANNEL_URL = 'https://updates.desos.invalid/apt'
+ARCHIVE_KEYRING = '/usr/share/keyrings/desos-archive-keyring.asc'
+UPDATE_SOURCE = f'''# DesOS network update channel. Managed by: desos-update-channel enable|disable|status
+Enabled: no
+Types: deb
+URIs: {UPDATE_CHANNEL_URL}
+Suites: desos
+Components: main
+Signed-By: {ARCHIVE_KEYRING}
+'''
+# Package names DesOS itself supplies (desktop, release identity, upstream kernel).
+DESOS_PACKAGE_PATTERNS = 'des-ui des-ui-* desos-* linux-image-*-desos linux-headers-*-desos'
+APT_PREFERENCES = f'''Explanation: DesOS supplies these packages; its signed origin outranks every
+Explanation: other archive (990 beats the default 500 without forcing downgrades).
+Package: {DESOS_PACKAGE_PATTERNS}
+Pin: release o=DesOS
+Pin-Priority: 990
+
+Explanation: Never take a same-named package from the Ubuntu base archive.
+Package: {DESOS_PACKAGE_PATTERNS}
+Pin: release o=Ubuntu
+Pin-Priority: -1
 '''
 
 LIVE_HOOK = '''#!/bin/sh
@@ -85,7 +104,8 @@ def write_configuration(root: Path, parent: Path = Path('/srv/desos-build')) -> 
         target.write_text(content)
         target.chmod(mode)
 
-    put('usr/share/desos/os-release', IDENTITY)
+    put('etc/apt/sources.list.d/desos-updates.sources', UPDATE_SOURCE)
+    put('etc/apt/preferences.d/desos', APT_PREFERENCES)
     put('usr/share/doc/desos/README', '''DesOS 0.1 Preview
 Linux desktop distribution using unmodified upstream Linux, DEs-UI and Ubuntu
 26.04-compatible packages. This live preview uses public account desos/password

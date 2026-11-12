@@ -1,0 +1,14 @@
+[Unit]
+Description=DesOS first-boot firewall policy (default deny incoming)
+ConditionPathExists=!/var/lib/desos/firewall-configured
+After=ufw.service
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/desos/firewall-setup
+
+[Install]
+WantedBy=multi-user.target

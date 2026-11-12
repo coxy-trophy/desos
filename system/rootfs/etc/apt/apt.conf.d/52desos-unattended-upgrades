@@ -1,0 +1,9 @@
+// DesOS identifies itself as "DesOS" to lsb_release, so the stock
+// "${distro_id}:${distro_codename}-security" origin never matches the Ubuntu
+// base. Name the Ubuntu security pocket and the DesOS suite explicitly.
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Ubuntu,archive=resolute-security";
+    "origin=DesOS,archive=desos";
+};
+// Never reboot behind the user's back.
+Unattended-Upgrade::Automatic-Reboot "false";

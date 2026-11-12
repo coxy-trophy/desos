@@ -1,0 +1,26 @@
+#!/bin/sh
+# DesOS first-boot firewall policy: refuse unsolicited incoming connections,
+# except DES Connect from private/link-local (LAN) source addresses.
+# Runs once; afterwards the administrator's own ufw choices are never touched.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+stamp=${DESOS_FIREWALL_STAMP:-/var/lib/desos/firewall-configured}
+ufw=${DESOS_UFW:-/usr/sbin/ufw}
+# DES Connect binds UDP 1716 and TCP 1716-1764 (profile: applications.d/des-connect).
+lan_sources="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fe80::/10"
+
+[ ! -e "$stamp" ] || exit 0
+[ -x "$ufw" ] || { echo 'desos firewall-setup: ufw is not installed' >&2; exit 1; }
+
+# ufw itself refuses to run unprivileged; any failure aborts before the stamp
+# is written, so the policy is retried on the next boot.
+"$ufw" default deny incoming
+"$ufw" default allow outgoing
+for source in $lan_sources; do
+    "$ufw" allow from "$source" to any app des-connect
+done
+"$ufw" --force enable
+mkdir -p "$(dirname "$stamp")"
+: > "$stamp"
+echo 'desos firewall-setup: default-deny incoming policy enabled'

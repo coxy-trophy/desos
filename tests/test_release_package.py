@@ -54,6 +54,15 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertIn("UBUNTU_CODENAME=resolute\n", release)
             self.assertIn('VERSION="0.1.0-preview1"\n', release)
             self.assertIn('PRETTY_NAME="DesOS 0.1 Preview"\n', release)
+            # Third-party tooling derives apt suites from the codename fields.
+            self.assertIn("VERSION_CODENAME=resolute\n", release)
+            self.assertIn('VERSION_ID="0.1.0"\n', release)
+            self.assertNotIn("preview1\nUBUNTU", release)
+            lsb = archive.extractfile("./etc/lsb-release").read().decode()
+            self.assertIn("DISTRIB_CODENAME=resolute\n", lsb)
+            self.assertIn("DISTRIB_ID=DesOS\n", lsb)
+            for line in release.splitlines():
+                self.assertRegex(line, r'^[A-Z_]+=("[^"$`\\]*"|[A-Za-z0-9._-]+)$')
             for entry in archive.getmembers():
                 self.assertEqual((entry.uid, entry.gid), (0, 0))
                 if entry.isfile():

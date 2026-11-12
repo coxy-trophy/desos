@@ -37,14 +37,26 @@ EOF
 export DEBIAN_FRONTEND=noninteractive
 chroot "$root" apt-get -o DPkg::Lock::Timeout=300 update
 mapfile -t packages < <(grep -Ev '^\s*(#|$)' "$here/packages.list")
-chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends "${packages[@]}" \
+# Reviewed component trees (system/, undo/, ...) add their own packages/units.
+# Plain assignments, so a refused component.json stops the build here.
+component_packages=$(python3 "$here/components.py" packages --recipes "$recipes")
+component_units=$(python3 "$here/components.py" units --recipes "$recipes")
+[[ -z $component_packages ]] || mapfile -t -O "${#packages[@]}" packages <<< "$component_packages"
+units=()
+[[ -z $component_units ]] || mapfile -t units <<< "$component_units"
+chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${packages[@]}" \
     linux-image-6.18.62-desos=6.18.62-1desos1 linux-headers-6.18.62-desos=6.18.62-1desos1
 # Reapply the final reviewed integration after every component is present.
 python3 "$here/configure.py" --root "$root"
 bash "$recipes/installer/install-into-rootfs.sh" "$root"
+# Component files go in only after every package is installed, so they are
+# never replaced by a package's own default configuration.
+python3 "$here/components.py" install --recipes "$recipes" --root "$root"
 chroot "$root" install -d -o _greetd -g _greetd -m 755 /var/lib/des-ui/greeter
 chroot "$root" systemctl set-default graphical.target
 chroot "$root" systemctl enable greetd NetworkManager systemd-resolved systemd-timesyncd bluetooth
+if (( ${#units[@]} )); then chroot "$root" systemctl enable "${units[@]}"; fi
 mkdir -p "$root/usr/share/doc/desos/build"
 for name in kernel-provenance.json source-pin.json signature-status.txt signature-log.txt config-6.18.62-desos baseline.config; do
     cp "$provenance/$name" "$root/usr/share/doc/desos/build/"

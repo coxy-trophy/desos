@@ -12,13 +12,16 @@ import tempfile
 PACKAGE = "desos-release"
 VERSION = "0.1.0~preview1"
 EPOCH = 1794268800
+# VERSION_CODENAME names the apt suite third-party tools build sources from
+# (lsb_release -cs, add-apt-repository, vendor install scripts), so it must be
+# the Ubuntu base codename, the same value as UBUNTU_CODENAME and lsb-release.
 OS_RELEASE = '''NAME="DesOS"
 VERSION="0.1.0-preview1"
 ID=desos
 ID_LIKE="ubuntu debian"
 PRETTY_NAME="DesOS 0.1 Preview"
 VERSION_ID="0.1.0"
-VERSION_CODENAME=preview1
+VERSION_CODENAME=resolute
 UBUNTU_CODENAME=resolute
 ANSI_COLOR="0;36"
 '''

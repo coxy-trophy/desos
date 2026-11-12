@@ -1,0 +1,19 @@
+{
+  "name": "system",
+  "packages": [
+    "apparmor",
+    "ufw",
+    "unattended-upgrades",
+    "systemd-zram-generator"
+  ],
+  "enable_units": [
+    "apparmor.service",
+    "ufw.service",
+    "desos-firewall-setup.service",
+    "unattended-upgrades.service",
+    "apt-daily.timer",
+    "apt-daily-upgrade.timer",
+    "power-profiles-daemon.service"
+  ],
+  "notes": "Security and platform groundwork: AppArmor userspace, first-boot default-deny firewall with a LAN-only DES Connect allowance, unattended Ubuntu security upgrades, zram swap and the desos-update-channel tool. fwupd, power-profiles-daemon and mesa-vulkan-drivers are in image/packages.list. Nothing here has been boot-tested."
+}

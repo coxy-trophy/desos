@@ -1,0 +1,132 @@
+#!/usr/bin/python3 -I
+"""Enable, disable or show the DesOS network update channel.
+
+The channel is one deb822 apt source, shipped disabled, signed by the same
+DesOS archive keyring as the repository bundled in the image. This tool only
+flips its `Enabled:` field. It never contacts a server and never runs apt.
+"""
+import argparse
+import os
+from pathlib import Path
+import sys
+import tempfile
+from urllib.parse import urlsplit
+
+SOURCE = Path('/etc/apt/sources.list.d/desos-updates.sources')
+REQUIRED = ('Types', 'URIs', 'Suites', 'Components', 'Signed-By')
+
+
+def parse(source):
+    """Return (lines, fields) of the single stanza; anything else refuses."""
+    source = Path(source)
+    if source.is_symlink() or not source.is_file():
+        raise ValueError(f'{source} is missing or not a regular file')
+    lines = source.read_text(encoding='utf-8').splitlines()
+    fields, seen_field, ended = {}, False, False
+    for line in lines:
+        if not line.strip():
+            ended = ended or seen_field
+            continue
+        if line.startswith('#'):
+            continue
+        if ended:
+            raise ValueError(f'{source} must contain exactly one source stanza')
+        key, separator, value = line.partition(':')
+        if not separator or key != key.strip() or line[0].isspace():
+            raise ValueError(f'{source} has an unsupported line: {line!r}')
+        if key.lower() in {name.lower() for name in fields}:
+            raise ValueError(f'{source} repeats the field {key}')
+        fields[key], seen_field = value.strip(), True
+    missing = [name for name in REQUIRED if name not in fields]
+    if missing:
+        raise ValueError(f'{source} lacks required fields: {", ".join(missing)}')
+    return lines, fields
+
+
+def enabled(fields):
+    value = next((v for k, v in fields.items() if k.lower() == 'enabled'), 'yes')
+    return value.lower() not in ('no', 'false', '0', 'off')
+
+
+def status(source=SOURCE):
+    _, fields = parse(source)
+    return {'enabled': enabled(fields), 'uri': fields['URIs'], 'suite': fields['Suites'],
+            'signed_by': fields['Signed-By'], 'published': published(fields['URIs'])}
+
+
+def published(uri):
+    """False for the placeholder shipped before any repository exists."""
+    host = urlsplit(uri).hostname or ''
+    return bool(host) and not host.endswith('.invalid')
+
+
+def check_enable(fields, root=Path('/')):
+    uri = fields['URIs']
+    if len(uri.split()) != 1 or urlsplit(uri).scheme != 'https':
+        raise ValueError('The update channel must be a single https:// URI')
+    if not published(uri):
+        raise ValueError('No DesOS update repository has been published for this release; '
+                         'the channel stays disabled')
+    keyring = Path(fields['Signed-By'])
+    if not keyring.is_absolute() or not (Path(root) / keyring.relative_to('/')).is_file():
+        raise ValueError(f'DesOS archive keyring {keyring} is missing; refusing an unverifiable source')
+
+
+def set_enabled(want, source=SOURCE, root=Path('/')):
+    """Rewrite only the Enabled field, replacing the file atomically."""
+    source = Path(source)
+    lines, fields = parse(source)
+    if want:
+        check_enable(fields, root)
+    value = 'yes' if want else 'no'
+    output, replaced = [], False
+    for line in lines:
+        if not line.startswith('#') and line.partition(':')[0].lower() == 'enabled':
+            output.append(f'Enabled: {value}')
+            replaced = True
+        else:
+            output.append(line)
+    if not replaced:
+        first = next(i for i, line in enumerate(output) if line.strip() and not line.startswith('#'))
+        output.insert(first, f'Enabled: {value}')
+    descriptor, temporary = tempfile.mkstemp(prefix='.desos-updates.', dir=source.parent)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write('\n'.join(output) + '\n')
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, source)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return want
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('command', choices=('enable', 'disable', 'status'))
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'status':
+            state = status()
+            print(f"DesOS update channel: {'enabled' if state['enabled'] else 'disabled'}")
+            print(f"Repository: {state['uri']} ({state['suite']})")
+            print(f"Signed by: {state['signed_by']}")
+            if not state['published']:
+                print('No DesOS update repository has been published for this release.')
+            return 0
+        if os.geteuid() != 0:
+            print('desos-update-channel: root required (use sudo)', file=sys.stderr)
+            return 1
+        set_enabled(args.command == 'enable')
+    except (OSError, ValueError) as error:
+        print(f'desos-update-channel: {error}', file=sys.stderr)
+        return 1
+    if args.command == 'enable':
+        print('DesOS update channel enabled. Run "apt update" to fetch its package lists.')
+    else:
+        print('DesOS update channel disabled.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

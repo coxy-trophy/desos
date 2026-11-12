@@ -175,7 +175,7 @@ def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
         shutil.copyfile(source,destination)
         require(sha256(destination)==digest and sha256(source)==digest,'package input changed during copy')
         destination.chmod(0o644)
-        packages.append(dict(metadata,source_path=str(source),pool_path=pool.as_posix(),
+        packages.append(dict(metadata,source_name=source.name,pool_path=pool.as_posix(),
                              size_bytes=destination.stat().st_size,sha256=digest))
     index=output/'dists/desos/main/binary-amd64/Packages'; index.parent.mkdir(parents=True)
     if tool=='apt-ftparchive':

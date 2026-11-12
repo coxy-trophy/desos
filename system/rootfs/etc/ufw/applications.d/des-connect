@@ -1,0 +1,4 @@
+[des-connect]
+title=DES Connect
+description=DES Connect phone link: UDP 1716 discovery, TCP 1716-1764 TLS link and payload transfers
+ports=1716/udp|1716:1764/tcp

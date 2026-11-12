@@ -55,6 +55,7 @@ gir1.2-secret-1
 libegl1
 libgl1-mesa-dri
 libgbm1
+mesa-vulkan-drivers
 libxkbcommon0
 libxkbcommon-x11-0
 xwayland
@@ -90,6 +91,8 @@ ntfs-3g
 exfatprogs
 udisks2
 upower
+power-profiles-daemon
+fwupd
 brightnessctl
 pciutils
 usbutils
