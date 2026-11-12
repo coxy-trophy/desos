@@ -117,8 +117,10 @@ there is no sudo, privilege escalation, or privileged container. The helper is a
 container entrypoint, never a direct host script. It verifies the mapped block
 node's major/minor and its kernel sysfs USB serial/model/removable/size again.
 
-GNU `/usr/bin/gnudd` writes at most the tested ISO size with `conv=fsync`. The helper then
-reads exactly every ISO byte using `iflag=direct,count_bytes` and `sha256sum`,
+GNU `/usr/bin/gnudd` writes at most the tested ISO size with `oflag=direct` and
+`conv=fsync`. Direct writes keep dirty device pages out of the container's
+memory budget. The helper then reads exactly every ISO byte using
+`iflag=direct,count_bytes` and `sha256sum`,
 compares to the tested source hash and rehashes the source again. Direct readback
 bypasses the host page cache. No broad cache dropping or privileged BLKFLSBUF ioctl
 is used. `fsync` is the recorded flush outcome; storage firmware may still have

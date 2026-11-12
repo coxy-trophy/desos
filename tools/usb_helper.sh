@@ -41,7 +41,8 @@ stage=source_validation
 read -r source_hash _ < <(sha256sum /source.iso)
 [[ "$source_hash" == "$expected_hash" ]]
 stage=write_fsync
-/usr/bin/gnudd if=/source.iso of=/dev/desos-target bs=4M count="$bytes" iflag=count_bytes,fullblock conv=fsync status=none
+# Avoid accumulating dirty block-device pages against the helper's memory limit.
+/usr/bin/gnudd if=/source.iso of=/dev/desos-target bs=4M count="$bytes" iflag=count_bytes,fullblock oflag=direct conv=fsync status=none
 stage=direct_readback
 # pipefail makes short/error reads or failed hashes fatal; GNU dd count_bytes
 # reads precisely the ISO size, including the final 2048-aligned partial block.
