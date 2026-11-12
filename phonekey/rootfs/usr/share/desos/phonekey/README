@@ -1,0 +1,49 @@
+DesOS phone approval of administrator actions
+=============================================
+
+A phone paired with this computer through DES Connect can approve a sudo
+command instead of you typing your password. It is OFF on a fresh system and
+stays off until an administrator turns it on. Your password always keeps
+working, and the first sign-in after starting the computer always needs it.
+
+Turning it on
+-------------
+1. In your desktop session, enrol the phone's key and allow approvals:
+     des-connect-ctl phonekey-status              (find the device ID)
+     des-connect-ctl phonekey-enrol DEVICE_ID     (confirm on the phone)
+     des-connect-ctl phonekey-set DEVICE_ID approve on
+2. As root, record that key for the system and add the PAM rule:
+     sudo desos-phonekey enable --user YOUR_NAME
+   Compare the fingerprint it prints with the one on the phone.
+3. Keep that root shell open and test in another terminal:
+     sudo -k true
+   Decline on the phone once and check the password prompt still appears.
+
+Turning it off
+--------------
+     sudo desos-phonekey disable            (everyone; PAM files restored)
+     sudo desos-phonekey disable --user X   (one user)
+     desos-phonekey status
+
+If you lose the phone: unpair it in DES Connect AND run
+"desos-phonekey disable --user YOUR_NAME". Unpairing alone stops requests
+reaching the phone, but the system record is only removed by disable.
+
+What to know
+------------
+* The phone shows the exact sudo command and signs it; the signature is
+  checked by root against the key recorded in /etc/desos/phonekey/users.
+  A program running as you cannot change that key or the text you are shown.
+* sudo remembers a successful authentication for a few minutes on the same
+  terminal, exactly as it does after a password. Later commands in that
+  window are not shown on the phone.
+* polkit (graphical "Authentication required" dialogs) is not included by
+  default: PAM is not told which action is being authorised, so the phone
+  could only say "an administrator action". Add it deliberately with
+  "--service polkit-1" if you accept that.
+* After 3 declined or unanswered requests the phone is not asked again for
+  10 minutes. Settings: /etc/desos/phonekey/phonekey.conf
+* Every request and decision is logged to the auth log and to
+  /var/log/desos-phonekey.log.
+* Example PAM files are in /usr/share/desos/phonekey/pam. They are examples;
+  let the tool make the edit.

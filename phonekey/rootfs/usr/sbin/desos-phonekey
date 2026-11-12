@@ -1,0 +1,817 @@
+#!/usr/bin/python3 -I
+"""desos-phonekey: let a paired phone approve administrator actions.
+
+Nothing here is active on a fresh image. `desos-phonekey enable --user NAME`
+(as root) records that user's enrolled phone key under /etc/desos/phonekey and
+adds one managed line to the chosen PAM services; `desos-phonekey disable`
+takes both away again and leaves the PAM files byte-for-byte as they were.
+
+The PAM line runs `desos-phonekey pam-auth` through pam_exec as `sufficient`:
+exit status 0 means the phone signed this exact request, and anything else
+(not enabled, phone away, declined, timed out, any error at all) falls through
+to the ordinary password prompt. The password always keeps working.
+
+The wire protocol and the signed message are specified in the phonekey
+README of the DesOS recipe tree. This file never sees a password.
+"""
+import argparse
+import base64
+import errno
+import hashlib
+import json
+import os
+import pwd
+import re
+import select
+import shlex
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+
+VERSION = 1
+DOMAIN = b'DES-PHONEKEY-v1\x00'
+P256_SPKI = bytes.fromhex('3059301306072a8648ce3d020106082a8648ce3d03010703420004')
+SPKI_LEN = 91
+MAX_ACTION = 512
+OPENSSL = '/usr/bin/openssl'
+SELF = '/usr/sbin/desos-phonekey'
+# PAM services this tool will touch, and the capability each belongs to.
+SERVICES = {'sudo': 'sudo', 'sudo-i': 'sudo', 'polkit-1': 'polkit-1'}
+CHOICES = ('sudo', 'polkit-1')
+BEGIN = '# BEGIN desos-phonekey (managed; remove with: desos-phonekey disable)'
+END = '# END desos-phonekey'
+RULE = 'auth\tsufficient\tpam_exec.so quiet stdout seteuid ' + SELF + ' pam-auth'
+USER = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}')
+HEX64 = re.compile(r'[0-9a-f]{64}')
+DEVICE = re.compile(r'[A-Za-z0-9_-]{32,38}')
+DEFAULTS = {'timeout_seconds': (20, 5, 60), 'max_failures': (3, 1, 10), 'lockout_seconds': (600, 60, 86400),
+            'cooldown_seconds': (60, 0, 3600), 'max_requests_per_10_minutes': (10, 1, 60)}
+UNSAFE = re.compile('[\u0000-\u001f\u007f-\u009f؜‎‏  ‪-‮⁦-⁩﻿]')
+
+
+class Refused(Exception):
+    """A reason to fall back to the password, or to refuse an admin command."""
+
+
+class Paths:
+    def __init__(self, root='/', owner=0):
+        root = os.path.abspath(root)
+        self.root, self.owner = root, owner
+        join = lambda *parts: os.path.join(root, *parts)
+        self.etc = join('etc/desos/phonekey')
+        self.conf = join('etc/desos/phonekey/phonekey.conf')
+        self.users = join('etc/desos/phonekey/users')
+        self.state = join('var/lib/desos-phonekey')
+        self.backups = join('var/lib/desos-phonekey/pam')
+        self.log = join('var/log/desos-phonekey.log')
+        self.pam_etc = join('etc/pam.d')
+        self.pam_lib = join('usr/lib/pam.d')
+        self.runtime = join('run/user')
+
+
+# --- the signed message -----------------------------------------------------
+
+def field(data):
+    return len(data).to_bytes(4, 'big') + data
+
+
+def message(purpose, desktop_id, desktop_cert, phone_id, phone_cert, key_id, request_id, nonce, user, action, issued_at, expires_at):
+    """The exact bytes the phone signs; identical to Challenge::message in des-connect."""
+    out = DOMAIN
+    for part in (purpose.encode(), desktop_id.encode(), desktop_cert, phone_id.encode(), phone_cert, key_id,
+                 request_id, nonce, user.encode(), action.encode()):
+        out += field(part)
+    return out + issued_at.to_bytes(8, 'big') + expires_at.to_bytes(8, 'big')
+
+
+def valid_action(action):
+    return (0 < len(action.encode()) <= MAX_ACTION and action == action.strip()
+            and not UNSAFE.search(action) and action.isprintable())
+
+
+def spki(text):
+    """A P-256 SubjectPublicKeyInfo from base64, or Refused. Nothing else is a phone key."""
+    try:
+        der = base64.b64decode(text, validate=True)
+    except (ValueError, TypeError):
+        raise Refused('the enrolled key is not base64') from None
+    if len(der) != SPKI_LEN or not der.startswith(P256_SPKI):
+        raise Refused('the enrolled key is not a P-256 public key')
+    return der
+
+
+def fingerprint(key_id):
+    text = key_id[:8].hex().upper()
+    return '-'.join(text[i:i + 4] for i in range(0, 16, 4))
+
+
+def verify(der, data, signature):
+    """True only when OpenSSL confirms an ECDSA/SHA-256 signature by this key."""
+    if not 8 <= len(signature) <= 72:
+        return False
+    pem = b'-----BEGIN PUBLIC KEY-----\n' + base64.encodebytes(der) + b'-----END PUBLIC KEY-----\n'
+    key_read, key_write = os.pipe()
+    sig_read, sig_write = os.pipe()
+    try:
+        os.write(key_write, pem)
+        os.write(sig_write, signature)
+        os.close(key_write)
+        os.close(sig_write)
+        key_write = sig_write = -1
+        done = subprocess.run([OPENSSL, 'dgst', '-sha256', '-verify', f'/dev/fd/{key_read}', '-signature', f'/dev/fd/{sig_read}'],
+                              input=data, capture_output=True, pass_fds=(key_read, sig_read), timeout=10,
+                              env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, cwd='/')
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        for fd in (key_read, sig_read, key_write, sig_write):
+            if fd >= 0:
+                os.close(fd)
+    return done.returncode == 0 and done.stdout.strip() == b'Verified OK'
+
+
+# --- files this tool trusts -------------------------------------------------
+
+def trusted(path, owner, directory=False, limit=65536):
+    """lstat a path that must belong to `owner` and be writable by nobody else."""
+    info = os.lstat(path)
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if not kind(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022:
+        raise Refused(f'{path} is not a private {"directory" if directory else "file"} of uid {owner}')
+    if not directory and info.st_size > limit:
+        raise Refused(f'{path} is too large')
+    return info
+
+
+def read_trusted(paths, path):
+    for parent in (paths.etc, os.path.dirname(path)):
+        trusted(parent, paths.owner, directory=True)
+    trusted(path, paths.owner)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, 'rb') as handle:
+        return handle.read(65537)
+
+
+def write_atomic(path, data, mode=0o644):
+    directory = os.path.dirname(path)
+    temporary = os.path.join(directory, f'.{os.path.basename(path)}.{os.getpid()}.tmp')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+        os.rename(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def settings(paths):
+    """Numeric settings, each clamped to its range; a bad file means the defaults."""
+    values = {name: default for name, (default, _, _) in DEFAULTS.items()}
+    try:
+        text = read_trusted(paths, paths.conf).decode('utf-8')
+    except (OSError, Refused, UnicodeDecodeError):
+        return values
+    for line in text.splitlines():
+        name, _, value = line.partition('=')
+        name, value = name.strip(), value.strip()
+        if name in DEFAULTS and value.isdigit() and len(value) < 9:
+            _, low, high = DEFAULTS[name]
+            values[name] = min(max(int(value), low), high)
+    return values
+
+
+def load_record(paths, user):
+    """The root-owned record of a user's enrolled phone, validated field by field."""
+    if not USER.fullmatch(user):
+        raise Refused('not a user name')
+    try:
+        record = json.loads(read_trusted(paths, os.path.join(paths.users, user + '.json')).decode('utf-8'))
+    except FileNotFoundError:
+        return None
+    except (ValueError, UnicodeDecodeError):
+        raise Refused('the phone-key record is unreadable') from None
+    if not isinstance(record, dict) or record.get('version') != VERSION or record.get('user') != user:
+        raise Refused('the phone-key record is for something else')
+    text = lambda name, pattern: isinstance(record.get(name), str) and pattern.fullmatch(record[name])
+    if not (text('desktop_id', DEVICE) and text('device_id', DEVICE) and text('desktop_cert', HEX64) and text('phone_cert', HEX64)
+            and isinstance(record.get('uid'), int) and record['uid'] > 0
+            and isinstance(record.get('services'), list) and all(s in CHOICES for s in record['services'])
+            and isinstance(record.get('device_name'), str) and isinstance(record.get('public_key'), str)):
+        raise Refused('the phone-key record is malformed')
+    record['spki'] = spki(record['public_key'])
+    return record
+
+
+def records(paths):
+    found = {}
+    try:
+        names = sorted(os.listdir(paths.users))
+    except OSError:
+        return found
+    for name in names:
+        if name.endswith('.json'):
+            try:
+                record = load_record(paths, name[:-5])
+            except (Refused, OSError) as error:
+                record = {'error': str(error), 'services': []}
+            if record:
+                found[name[:-5]] = record
+    return found
+
+
+# --- limits and the audit trail ---------------------------------------------
+
+def load_state(paths, user):
+    try:
+        state = json.loads(read_state(paths, user))
+    except (OSError, ValueError, Refused):
+        return {'failures': 0, 'locked_until': 0, 'cooldown_until': 0, 'recent': []}
+    clean = {'failures': 0, 'locked_until': 0, 'cooldown_until': 0, 'recent': []}
+    for name in ('failures', 'locked_until', 'cooldown_until'):
+        if isinstance(state.get(name), (int, float)) and state[name] >= 0:
+            clean[name] = state[name]
+    if isinstance(state.get('recent'), list):
+        clean['recent'] = [at for at in state['recent'] if isinstance(at, (int, float))][-64:]
+    return clean
+
+
+def read_state(paths, user):
+    path = os.path.join(paths.state, user + '.state')
+    trusted(paths.state, paths.owner, directory=True)
+    trusted(path, paths.owner)
+    with open(path, 'rb') as handle:
+        return handle.read(65536)
+
+
+def save_state(paths, user, state):
+    os.makedirs(paths.state, mode=0o700, exist_ok=True)
+    trusted(paths.state, paths.owner, directory=True)
+    write_atomic(os.path.join(paths.state, user + '.state'), json.dumps(state).encode(), 0o600)
+
+
+def audit(paths, entry):
+    """Every request and decision: one JSON line, and the same to the auth log."""
+    entry = dict(entry, ts=int(time.time()))
+    line = json.dumps(entry, sort_keys=True)
+    try:
+        import syslog
+        syslog.openlog('desos-phonekey', syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_NOTICE, line)
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(paths.log), exist_ok=True)
+        if os.path.lexists(paths.log) and os.lstat(paths.log).st_size > 1 << 20:
+            os.replace(paths.log, paths.log + '.1')
+        fd = os.open(paths.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, 'a') as handle:
+            handle.write(line + '\n')
+    except OSError:
+        pass
+
+
+# --- talking to the user's own des-connectd ---------------------------------
+
+def as_user(account, work, patience):
+    """Run `work()` in a child that has become `account`, and return its bytes.
+
+    Root never parses a file or speaks on a socket that the user controls with
+    root's privileges; the child's whole answer is one bounded byte string.
+    """
+    if os.geteuid() == account.pw_uid:
+        return work()
+    read, write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        status = 1
+        try:
+            os.close(read)
+            os.initgroups(account.pw_name, account.pw_gid)
+            os.setgid(account.pw_gid)
+            os.setuid(account.pw_uid)
+            if os.getuid() != account.pw_uid or os.geteuid() != account.pw_uid:
+                raise Refused('privileges were not dropped')
+            os.write(write, work()[:262144])
+            status = 0
+        except BaseException:
+            status = 1
+        finally:
+            os._exit(status)
+    os.close(write)
+    data, deadline = b'', time.monotonic() + patience
+    try:
+        while len(data) <= 262144:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([read], [], [], left)[0]:
+                raise Refused('timed out waiting for the user side')
+            chunk = os.read(read, 65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(read)
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
+        _, status = os.waitpid(child, 0)
+    if not data:
+        raise Refused('the user side gave no answer')
+    return data
+
+
+def daemon_request(socket_path, uid, request, patience):
+    """One JSON line to des-connectd's private socket, one JSON line back."""
+    info = os.lstat(socket_path)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid:
+        raise Refused('the DES Connect socket is not this user\'s')
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as link:
+        link.settimeout(5)
+        link.connect(socket_path)
+        link.sendall(json.dumps(request).encode() + b'\n')
+        link.settimeout(patience)
+        data = b''
+        while not data.endswith(b'\n'):
+            chunk = link.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > 262144:
+                raise Refused('the DES Connect answer is too large')
+    return data
+
+
+def transport(paths, account, request, patience):
+    path = os.path.join(paths.runtime, str(account.pw_uid), 'des-connect/control.sock')
+    return as_user(account, lambda: daemon_request(path, account.pw_uid, request, patience), patience + 5)
+
+
+# --- what is being approved -------------------------------------------------
+
+def clean(text):
+    text = UNSAFE.sub('?', text)
+    return ''.join(c if c.isprintable() else '?' for c in text).strip()
+
+
+def describe(service, user, parent=None, proc='/proc'):
+    """The text the phone shows and signs. Root works this out itself; nothing the
+    user's session says is believed. For sudo it is the command line of the sudo
+    process that asked. polkit does not tell PAM what the action is, so that text
+    says so instead of guessing."""
+    if SERVICES.get(service) == 'polkit-1':
+        return f'Administrator action through polkit as {user} (the action itself is not shown here)'
+    parent = os.getppid() if parent is None else parent
+    try:
+        program = os.path.basename(os.readlink(f'{proc}/{parent}/exe'))
+        with open(f'{proc}/{parent}/cmdline', 'rb') as handle:
+            raw = handle.read(16384)
+        words = [word.decode('utf-8', 'replace') for word in raw.rstrip(b'\0').split(b'\0')]
+    except OSError:
+        program, raw, words = '', b'', []
+    if not program.startswith('sudo') or not words:
+        return f'sudo as {user} (the command could not be read)'
+    text = clean(shlex.join(['sudo'] + words[1:]))
+    if len(text.encode()) > 400:
+        short = text.encode()[:360].decode('utf-8', 'ignore').rstrip()
+        text = f'{short} [cut; {len(raw)} bytes, sha256 {hashlib.sha256(raw).hexdigest()[:16]}]'
+    return text if valid_action(text) else f'sudo as {user} (the command could not be shown)'
+
+
+# --- the PAM helper ---------------------------------------------------------
+
+def pam_auth(paths, env, send=transport, out=None, clock=time.time, parent=None, proc='/proc'):
+    """0 only when the enrolled phone signed this request. Never raises."""
+    try:
+        return _pam_auth(paths, env, send, out or sys.stdout, clock, parent, proc)
+    except BaseException as error:  # any failure at all is "use the password"
+        try:
+            audit(paths, {'event': 'error', 'error': type(error).__name__, 'detail': str(error)[:200]})
+        except BaseException:
+            pass
+        return 1
+
+
+def _pam_auth(paths, env, send, out, clock, parent, proc):
+    service, user = env.get('PAM_SERVICE', ''), env.get('PAM_USER', '')
+    if env.get('PAM_TYPE') != 'auth' or service not in SERVICES or not USER.fullmatch(user):
+        return 1
+    try:
+        record = load_record(paths, user)
+    except FileNotFoundError:
+        return 1
+    # Not enabled for this user or this service: say nothing, log nothing.
+    if record is None or SERVICES[service] not in record['services']:
+        return 1
+    account = pwd.getpwnam(user)
+    if account.pw_uid == 0 or account.pw_uid != record['uid']:
+        raise Refused('the record does not belong to this account')
+    limits, now = settings(paths), clock()
+    state = load_state(paths, user)
+    state['recent'] = [at for at in state['recent'] if 0 <= now - at < 600]
+    base = {'user': user, 'service': service, 'device': record['device_id']}
+    for name, why in (('locked_until', 'locked_out'), ('cooldown_until', 'cooling_down')):
+        if now < state[name]:
+            audit(paths, dict(base, event='skipped', reason=why))
+            return 1
+    if len(state['recent']) >= limits['max_requests_per_10_minutes']:
+        audit(paths, dict(base, event='skipped', reason='rate_limited'))
+        return 1
+
+    action = describe(service, user, parent, proc)
+    request_id, nonce = os.urandom(16), os.urandom(32)
+    issued, timeout = int(now), limits['timeout_seconds']
+    expires = issued + timeout
+    key_id = hashlib.sha256(record['spki']).digest()
+    base.update(request_id=request_id.hex(), action=action)
+    audit(paths, dict(base, event='request'))
+    print(f'Approve on {clean(record["device_name"])[:64] or "your phone"}: {action}', file=out)
+    print(f'Waiting up to {timeout} seconds. Decline on the phone, or wait, to type your password instead.', file=out, flush=True)
+
+    started = time.monotonic()
+    request = {'op': 'phonekey_request', 'device_id': record['device_id'], 'purpose': 'approve', 'user': user, 'action': action,
+               'request_id': request_id.hex(), 'nonce': base64.b64encode(nonce).decode(), 'issued_at': issued, 'expires_at': expires}
+    outcome, counted = 'unavailable', False
+    try:
+        answer = json.loads(send(paths, account, request, timeout + 3).decode('utf-8'))
+        if not isinstance(answer, dict):
+            raise Refused('not an object')
+        if answer.get('ok') is not True:
+            # The daemon would not or could not ask: phone away, capability off,
+            # session locked. Nobody was prompted, so nothing is counted.
+            outcome = 'unavailable: ' + clean(str(answer.get('error', '')))[:120]
+        else:
+            counted = True
+            state['recent'].append(now)
+            decision = answer.get('decision')
+            signature = answer.get('signature')
+            if decision != 'approved':
+                outcome = decision if decision in ('denied', 'timeout', 'cancelled', 'bad_signature', 'expired') else 'malformed'
+            elif answer.get('request_id') != request_id.hex() or not isinstance(signature, str) or len(signature) > 128:
+                outcome = 'malformed'
+            elif time.monotonic() - started >= timeout or clock() >= expires:
+                outcome = 'expired'
+            else:
+                # The decision: our nonce, our text, the key root recorded. Nothing
+                # else in the answer is read.
+                signed = message('approve', record['desktop_id'], bytes.fromhex(record['desktop_cert']), record['device_id'],
+                                 bytes.fromhex(record['phone_cert']), key_id, request_id, nonce, user, action, issued, expires)
+                try:
+                    raw = base64.b64decode(signature, validate=True)
+                except ValueError:
+                    raw = b''
+                outcome = 'approved' if verify(record['spki'], signed, raw) else 'bad_signature'
+    except (Refused, OSError, ValueError, UnicodeDecodeError) as error:
+        outcome = 'unavailable: ' + clean(str(error))[:120]
+
+    if outcome == 'approved':
+        state['failures'] = 0
+    elif counted:
+        state['failures'] += 1
+        state['cooldown_until'] = now + limits['cooldown_seconds']
+        if state['failures'] >= limits['max_failures']:
+            state['failures'], state['locked_until'] = 0, now + limits['lockout_seconds']
+            base['locked_out_seconds'] = limits['lockout_seconds']
+    save_state(paths, user, state)
+    audit(paths, dict(base, event='decision', decision=outcome))
+    if outcome == 'approved':
+        print('Approved on the phone.', file=out, flush=True)
+        return 0
+    return 1
+
+
+# --- PAM files --------------------------------------------------------------
+
+AUTH_LINE = re.compile(r'\s*(-?auth\s|@include\s+common-auth\b)')
+
+
+def insert_block(text):
+    """Add the managed block just before the first auth rule. Everything else in
+    the file, down to its line endings, stays exactly as it was."""
+    if BEGIN in text or END in text or SELF in text:
+        raise Refused('the file already mentions desos-phonekey')
+    lines = text.split('\n')
+    for index, line in enumerate(lines):
+        if AUTH_LINE.match(line):
+            new = '\n'.join(lines[:index] + [BEGIN, RULE, END] + lines[index:])
+            if remove_block(new) != text:
+                raise Refused('the edit would not be reversible')
+            return new
+    raise Refused('the file has no auth rule to go in front of')
+
+
+def remove_block(text):
+    """Take the managed block out again; without one the text is returned as is."""
+    lines = text.split('\n')
+    if BEGIN not in lines:
+        if END in lines or any(SELF in line for line in lines):
+            raise Refused('the managed block is damaged; fix the file by hand')
+        return text
+    index = lines.index(BEGIN)
+    if lines[index:index + 3] != [BEGIN, RULE, END] or lines.count(BEGIN) != 1 or lines.count(END) != 1:
+        raise Refused('the managed block is damaged; fix the file by hand')
+    return '\n'.join(lines[:index] + lines[index + 3:])
+
+
+def read_pam(path):
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+        raise Refused(f'{path} is not an ordinary PAM file')
+    with open(path, 'rb') as handle:
+        return handle.read().decode('latin-1'), stat.S_IMODE(info.st_mode)
+
+
+def pam_targets(paths, capability):
+    """The PAM files of one capability that exist on this system."""
+    found = []
+    for service, owner in SERVICES.items():
+        if owner != capability:
+            continue
+        etc, lib = os.path.join(paths.pam_etc, service), os.path.join(paths.pam_lib, service)
+        if os.path.lexists(etc) or os.path.lexists(lib):
+            found.append((service, etc, lib))
+    return found
+
+
+def pam_state(paths, service):
+    etc = os.path.join(paths.pam_etc, service)
+    try:
+        text, _ = read_pam(etc)
+    except FileNotFoundError:
+        return 'absent'
+    except Refused:
+        return 'unreadable'
+    try:
+        return 'enabled' if remove_block(text) != text else 'clean'
+    except Refused:
+        return 'damaged'
+
+
+def pam_enable(paths, capability):
+    """Plan every edit first, then write. A refusal changes nothing."""
+    targets = pam_targets(paths, capability)
+    if not targets:
+        raise Refused(f'no PAM service file for {capability} on this system')
+    plan = []
+    for service, etc, lib in targets:
+        created = not os.path.lexists(etc)
+        text, mode = read_pam(lib if created else etc)
+        if not created and remove_block(text) != text:
+            continue
+        plan.append((service, etc, created, text, insert_block(text), mode))
+    for directory in (paths.state, paths.backups):
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    for service, etc, created, text, new, mode in plan:
+        note = {'created': created, 'sha256': hashlib.sha256(text.encode('latin-1')).hexdigest()}
+        write_atomic(os.path.join(paths.backups, service + '.orig'), text.encode('latin-1'), 0o600)
+        write_atomic(os.path.join(paths.backups, service + '.json'), json.dumps(note).encode(), 0o600)
+        os.makedirs(paths.pam_etc, mode=0o755, exist_ok=True)
+        write_atomic(etc, new.encode('latin-1'), mode)
+    return [service for service, *_ in plan]
+
+
+def pam_disable(paths, capability):
+    """Remove the managed block. Returns (service, how it was left) pairs."""
+    report = []
+    for service, etc, lib in pam_targets(paths, capability):
+        if not os.path.lexists(etc):
+            continue
+        text, mode = read_pam(etc)
+        new = remove_block(text)
+        if new == text:
+            continue
+        note_path, orig_path = os.path.join(paths.backups, service + '.json'), os.path.join(paths.backups, service + '.orig')
+        try:
+            with open(note_path, 'rb') as handle:
+                note = json.loads(handle.read(4096))
+        except (OSError, ValueError):
+            note = {}
+        same = hashlib.sha256(new.encode('latin-1')).hexdigest() == note.get('sha256')
+        if note.get('created') is True and same:
+            # We made this /etc override from the vendor file; without our block
+            # it is that file again, so the override goes and the vendor file rules.
+            os.unlink(etc)
+            how = 'removed the override this tool created'
+        else:
+            write_atomic(etc, new.encode('latin-1'), mode)
+            how = 'restored byte for byte' if same else 'block removed; the file had other changes since, which were kept'
+        for path in (note_path, orig_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        report.append((service, how))
+    return report
+
+
+# --- enable / disable / status ----------------------------------------------
+
+def read_store(account, directory):
+    """The user's DES Connect identity and peers, read as that user."""
+    def work():
+        out = {}
+        for name in ('identity.json', 'peers.json'):
+            fd = os.open(os.path.join(directory, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(fd, 'rb') as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise Refused('not a regular file')
+                out[name] = base64.b64encode(handle.read(262144)).decode()
+        return json.dumps(out).encode()
+    try:
+        raw = json.loads(as_user(account, work, 10))
+        identity = json.loads(base64.b64decode(raw['identity.json']))
+        peers = json.loads(base64.b64decode(raw['peers.json']))
+        import ssl
+        desktop_cert = hashlib.sha256(ssl.PEM_cert_to_DER_cert(identity['cert_pem'])).hexdigest()
+        desktop_id = identity['id']
+        if not isinstance(peers, dict) or not isinstance(desktop_id, str) or not DEVICE.fullmatch(desktop_id):
+            raise ValueError('unexpected shape')
+    except (OSError, ValueError, KeyError, TypeError, Refused) as error:
+        raise Refused(f'cannot read {account.pw_name}\'s DES Connect store in {directory}: {error}') from None
+    return desktop_id, desktop_cert, peers
+
+
+def candidates(peers):
+    """Paired phones whose enrolled key the user has switched on for approvals."""
+    found = {}
+    for device_id, peer in peers.items():
+        key = peer.get('phonekey') if isinstance(peer, dict) else None
+        if not (isinstance(key, dict) and key.get('approve') is True and isinstance(device_id, str) and DEVICE.fullmatch(device_id)):
+            continue
+        try:
+            der = spki(key.get('public_key'))
+            phone_cert = hashlib.sha256(bytes.fromhex(peer['certificate'])).hexdigest()
+        except (Refused, ValueError, KeyError, TypeError):
+            continue
+        found[device_id] = {'name': clean(str(peer.get('name', '')))[:64], 'public_key': key['public_key'], 'spki': der, 'phone_cert': phone_cert}
+    return found
+
+
+def command_enable(paths, options, out):
+    user = options.user
+    if not USER.fullmatch(user):
+        raise Refused('not a user name')
+    account = pwd.getpwnam(user)
+    if account.pw_uid == 0:
+        raise Refused('root needs no approval and gets no phone key')
+    services = list(dict.fromkeys(options.service or ['sudo']))
+    store = options.store or os.path.join(account.pw_dir, '.local/state/des-ui/connect')
+    desktop_id, desktop_cert, peers = read_store(account, store)
+    found = candidates(peers)
+    if options.device:
+        found = {key: value for key, value in found.items() if key == options.device}
+    if len(found) != 1:
+        raise Refused('no paired phone with an enrolled key and "approve" switched on was found; in the user\'s session run\n'
+                      '  des-connect-ctl phonekey-enrol DEVICE_ID && des-connect-ctl phonekey-set DEVICE_ID approve on'
+                      if not found else 'more than one phone qualifies; choose one with --device: ' + ', '.join(sorted(found)))
+    device_id, phone = next(iter(found.items()))
+    key_id = hashlib.sha256(phone['spki']).digest()
+    print(f'User:        {user} (uid {account.pw_uid})', file=out)
+    print(f'Phone:       {phone["name"]} ({device_id})', file=out)
+    print(f'Fingerprint: {fingerprint(key_id)}   <- must match the one DES Connect shows on the phone', file=out)
+    print(f'Services:    {", ".join(services)}', file=out)
+    if not options.yes:
+        print('Type yes to let this phone approve these administrator actions: ', end='', file=out, flush=True)
+        if sys.stdin.readline().strip() != 'yes':
+            raise Refused('not confirmed; nothing was changed')
+    # Check every PAM edit can be made before anything is written.
+    for capability in services:
+        targets = pam_targets(paths, capability)
+        if not targets:
+            raise Refused(f'no PAM service file for {capability} on this system')
+        for service, etc, lib in targets:
+            text, _ = read_pam(etc if os.path.lexists(etc) else lib)
+            if remove_block(text) == text:
+                insert_block(text)
+    record = {'version': VERSION, 'user': user, 'uid': account.pw_uid, 'device_id': device_id, 'device_name': phone['name'],
+              'desktop_id': desktop_id, 'desktop_cert': desktop_cert, 'phone_cert': phone['phone_cert'],
+              'public_key': phone['public_key'], 'key_id': key_id.hex(), 'services': services, 'enrolled_at': int(time.time())}
+    for directory in (paths.etc, paths.users):
+        os.makedirs(directory, mode=0o755, exist_ok=True)
+    write_atomic(os.path.join(paths.users, user + '.json'), (json.dumps(record, indent=1, sort_keys=True) + '\n').encode(), 0o644)
+    for capability in services:
+        for service in pam_enable(paths, capability):
+            print(f'PAM:         added the managed block to {os.path.join(paths.pam_etc, service)}', file=out)
+    audit(paths, {'event': 'enabled', 'user': user, 'device': device_id, 'services': services, 'key_id': key_id.hex()})
+    print('\nEnabled. KEEP THIS ROOT SHELL OPEN and test in another terminal:  sudo -k true\n'
+          'The password prompt must still appear when the phone is away or you decline.\n'
+          'To undo everything:  desos-phonekey disable', file=out)
+    return 0
+
+
+def command_disable(paths, options, out):
+    known = records(paths)
+    going = [options.user] if options.user else sorted(known)
+    if options.user and not USER.fullmatch(options.user):
+        raise Refused('not a user name')
+    for user in going:
+        for path in (os.path.join(paths.users, user + '.json'), os.path.join(paths.state, user + '.state')):
+            try:
+                os.unlink(path)
+                print(f'Removed {path}', file=out)
+            except FileNotFoundError:
+                pass
+    left = records(paths)
+    wanted = {service for record in left.values() for service in record.get('services', [])}
+    for capability in CHOICES:
+        if capability not in wanted:
+            for service, how in pam_disable(paths, capability):
+                print(f'PAM: {os.path.join(paths.pam_etc, service)}: {how}', file=out)
+    audit(paths, {'event': 'disabled', 'users': going})
+    print('Phone approval is off' + (f' for {options.user}.' if options.user else ' for everyone.') + ' Passwords are unaffected.', file=out)
+    return 0
+
+
+def command_status(paths, options, out):
+    known = records(paths)
+    pam = {service: pam_state(paths, service) for service in SERVICES}
+    report = {'users': {user: {key: record.get(key) for key in ('device_id', 'device_name', 'services', 'key_id', 'error') if record.get(key) is not None}
+                        for user, record in known.items()}, 'pam': pam, 'warnings': []}
+    wanted = {service for record in known.values() for service in record.get('services', [])}
+    for service, state in pam.items():
+        if state == 'enabled' and SERVICES[service] not in wanted:
+            report['warnings'].append(f'{service} has the managed block but no user is enrolled for it (harmless: the helper does nothing)')
+        if state in ('damaged', 'unreadable'):
+            report['warnings'].append(f'{service}: the PAM file is {state}')
+    for capability in wanted:
+        if not any(pam[service] == 'enabled' for service, owner in SERVICES.items() if owner == capability):
+            report['warnings'].append(f'users are enrolled for {capability} but its PAM file has no managed block; run enable again')
+    report['active'] = bool(known) and any(state == 'enabled' for state in pam.values())
+    if options.json:
+        print(json.dumps(report, indent=1, sort_keys=True), file=out)
+        return 0
+    print('Phone approval of administrator actions: ' + ('ON' if report['active'] else 'off'), file=out)
+    for user, record in report['users'].items():
+        if 'error' in record:
+            print(f'  {user}: record refused: {record["error"]}', file=out)
+        else:
+            print(f'  {user}: {record["device_name"]} [{fingerprint(bytes.fromhex(record["key_id"]))}] for {", ".join(record["services"])}', file=out)
+    for service, state in pam.items():
+        print(f'  PAM {service}: {state}', file=out)
+    for warning in report['warnings']:
+        print(f'  warning: {warning}', file=out)
+    return 0
+
+
+def main(argv=None, out=None):
+    argv = sys.argv[1:] if argv is None else argv
+    out = out or sys.stdout
+    if argv[:1] == ['pam-auth']:
+        # No options, no alternate root, no environment switches: only pam_exec's
+        # PAM_* variables are read, and a watchdog ends a stuck helper.
+        if len(argv) != 1 or os.geteuid() != 0:
+            return 1
+        signal.alarm(120)
+        try:
+            os.setresgid(0, 0, 0)
+            os.setresuid(0, 0, 0)
+            os.umask(0o077)
+        except OSError:
+            return 1
+        return pam_auth(Paths(), {name: os.environ.get(name, '') for name in ('PAM_TYPE', 'PAM_SERVICE', 'PAM_USER')})
+    parser = argparse.ArgumentParser(prog='desos-phonekey', description='Let a paired phone approve administrator actions (off by default).')
+    parser.add_argument('--root', default='/', help='operate on an image tree instead of the running system')
+    commands = parser.add_subparsers(dest='command', required=True)
+    enable = commands.add_parser('enable', help='let one user\'s enrolled phone approve sudo (and, if asked, polkit)')
+    enable.add_argument('--user', required=True)
+    enable.add_argument('--device', help='DES Connect device ID, when the user has more than one enrolled phone')
+    enable.add_argument('--service', action='append', choices=CHOICES, help='default: sudo; repeat to add polkit-1')
+    enable.add_argument('--store', help='the user\'s DES Connect state directory (default ~/.local/state/des-ui/connect)')
+    enable.add_argument('--yes', action='store_true', help='do not ask for confirmation')
+    disable = commands.add_parser('disable', help='turn phone approval off and restore the PAM files')
+    disable.add_argument('--user', help='only this user; the default is everyone')
+    status = commands.add_parser('status', help='show what is enabled')
+    status.add_argument('--json', action='store_true')
+    try:
+        options = parser.parse_args(argv)
+    except SystemExit as stop:
+        return int(stop.code or 0)
+    alternate = os.path.abspath(options.root) != '/'
+    if options.command != 'status' and not alternate and os.geteuid() != 0:
+        print('desos-phonekey: this changes how administrators are authenticated; run it as root', file=sys.stderr)
+        return 2
+    paths = Paths(options.root, owner=os.geteuid() if alternate else 0)
+    os.umask(0o022)
+    try:
+        return {'enable': command_enable, 'disable': command_disable, 'status': command_status}[options.command](paths, options, out)
+    except (Refused, KeyError, OSError) as error:
+        print(f'desos-phonekey: {error}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

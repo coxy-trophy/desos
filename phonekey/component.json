@@ -1,0 +1,6 @@
+{
+  "name": "phonekey",
+  "packages": ["python3", "openssl", "libpam-modules"],
+  "enable_units": [],
+  "notes": "Phone approval of administrator actions (sudo, optionally polkit) by a phone paired through DES Connect. Ships the root tool /usr/sbin/desos-phonekey (enable|disable|status, plus the pam_exec helper mode), a defaults-only /etc/desos/phonekey/phonekey.conf and example PAM snippets under /usr/share/desos/phonekey/pam. Nothing is enabled and no file under /etc/pam.d is shipped or changed: the image's PAM stack is byte-for-byte the stock one until root runs 'desos-phonekey enable --user NAME'. Needs the des-ui build that carries the phone-key Connect daemon (branch feature/phone-key). Never exercised against a real PAM stack or a real phone; see phonekey/README.md."
+}

@@ -1,0 +1,20 @@
+# EXAMPLE ONLY. Not installed anywhere PAM reads. Do not copy by hand:
+#   desos-phonekey enable --user NAME --service sudo --service polkit-1
+# makes this edit. polkit is NOT included unless asked for by name, because
+# PAM is not told which polkit action is being authorised: the phone can only
+# show "an administrator action through polkit", not what it is.
+#
+# /etc/pam.d/polkit-1 after enabling. When the vendor file lives in
+# /usr/lib/pam.d/polkit-1, the tool creates this /etc override from it and
+# removes the override again on disable.
+
+#%PAM-1.0
+
+# BEGIN desos-phonekey (managed; remove with: desos-phonekey disable)
+auth	sufficient	pam_exec.so quiet stdout seteuid /usr/sbin/desos-phonekey pam-auth
+# END desos-phonekey
+@include common-auth
+@include common-account
+@include common-password
+session       required   pam_env.so readenv=1 user_readenv=0
+@include common-session-noninteractive

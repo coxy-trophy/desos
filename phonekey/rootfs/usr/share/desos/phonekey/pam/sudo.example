@@ -1,0 +1,21 @@
+# EXAMPLE ONLY. Not installed anywhere PAM reads. Do not copy by hand:
+#   desos-phonekey enable --user NAME
+# makes this edit, keeps a backup and can undo it byte for byte.
+#
+# /etc/pam.d/sudo after "desos-phonekey enable" on a stock DesOS image.
+# The three managed lines are the only difference from the stock file.
+# "sufficient" means: exit 0 from the helper authenticates; any other result,
+# including a missing helper or module, is ignored and the stack continues to
+# the ordinary password rules in common-auth.
+
+#%PAM-1.0
+session    required   pam_limits.so
+session    required   pam_env.so readenv=1 user_readenv=0
+session    required   pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+
+# BEGIN desos-phonekey (managed; remove with: desos-phonekey disable)
+auth	sufficient	pam_exec.so quiet stdout seteuid /usr/sbin/desos-phonekey pam-auth
+# END desos-phonekey
+@include common-auth
+@include common-account
+@include common-session-noninteractive
