@@ -1,0 +1,9 @@
+{
+  "name": "boot-theme",
+  "packages": [
+    "grub-common",
+    "grub2-common"
+  ],
+  "enable_units": [],
+  "notes": "DesOS GRUB theme in /boot/grub/themes/desos (beside grub.cfg, so readable before the root filesystem is mounted, including btrfs subvolumes), enabled by /etc/default/grub.d/20-desos-theme.cfg; /etc/grub.d/06_desos_theme must stay executable. update-grub must run after installation (Calamares' bootloader step does). The live ISO stages the same theme through image/iso_recipe.py. Rendered in QEMU with BIOS GRUB 2.14 only; UEFI and the installed-system path are untested. See boot-theme/README.md."
+}

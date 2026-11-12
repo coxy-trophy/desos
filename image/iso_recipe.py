@@ -80,23 +80,150 @@ def select_kernels(root):
     return selected
 
 
-def grub_menu():
-    common = 'boot=casper live-media-path=casper username=desos hostname=desos-live nopersistent console=tty0 console=ttyS0,115200n8'
-    entries = [
-        ('Try DesOS 0.1 Preview', 'upstream', ' quiet splash'),
-        ('Install DesOS 0.1 Preview', 'upstream', ' quiet splash desos.install=1'),
-        ('Compatibility: Ubuntu kernel (recovery choice)', 'compat', ' quiet splash'),
-        ('Debug DesOS upstream (verbose boot)', 'upstream', ' debug loglevel=7 systemd.show_status=1'),
-    ]
-    lines = ['set default=0', 'set timeout=8', 'insmod all_video',
-             'serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1',
-             'terminal_input console serial', 'terminal_output console serial',
-             'search --no-floppy --file --set=root /.disk/desos-live-id', '']
-    for title, kernel, extra in entries:
-        lines.extend([f'menuentry "{title}" {{',
-                      f'    linux /casper/vmlinuz-{kernel} {common}{extra}',
+RELEASE = 'DesOS 0.1 Preview'
+# The boot-theme component owns the theme; the ISO carries the same files.
+THEME_SOURCE = Path(__file__).resolve().parent.parent / 'boot-theme/rootfs/boot/grub/themes/desos'
+THEME_PATH = '/boot/grub/themes/desos'
+# Kernel consoles. The last console= is /dev/console, so the display is always
+# last: boot messages, the emergency shell and Plymouth belong to the screen.
+# ${desos_serial} is empty unless GRUB found a UART (see grub_menu); when it is
+# set the kernel log and a login also reach ttyS0 for QA.
+CONSOLES = '${desos_serial} console=tty0'
+CASPER = 'boot=casper live-media-path=casper username=desos hostname=desos-live nopersistent ' + CONSOLES
+# Plymouth drops to its text renderer when any serial console is on the command
+# line; this keeps the graphical splash while ttyS0 stays a kernel console.
+SPLASH = ' quiet splash plymouth.ignore-serial-consoles'
+LIVE_ENTRIES = [
+    # (id, class, title, one-line description, kernel flavor, extra arguments)
+    ('desos-try', 'desos', 'Try ' + RELEASE, 'live desktop, nothing is installed', 'upstream', SPLASH),
+    ('desos-install', 'install', 'Install ' + RELEASE, 'live desktop, opens the installer', 'upstream', SPLASH + ' desos.install=1'),
+    ('desos-compat', 'compat', 'Compatibility: Ubuntu kernel', 'if the DesOS kernel does not start', 'compat', SPLASH),
+    ('desos-debug', 'debug', 'Debug DesOS upstream', 'verbose boot, no splash', 'upstream', ' debug loglevel=7 systemd.show_status=1'),
+]
+
+
+def theme_fonts(source=None):
+    """The theme's PF2 files and the font its theme.txt names for the terminal."""
+    source = THEME_SOURCE if source is None else source
+    if source.is_symlink() or not (source / 'theme.txt').is_file():
+        raise ValueError('boot theme absent: ' + str(source))
+    files = sorted(path.name for path in source.glob('*.pf2'))
+    terminal = re.search(r'^terminal-font:\s*"([^"$]+)"\s*$', (source / 'theme.txt').read_text(), re.M)
+    if not files or not terminal:
+        raise ValueError('boot theme has no fonts or no terminal-font')
+    if any(not re.fullmatch(r'[a-z0-9_]+\.pf2', name) for name in files):
+        raise ValueError('boot theme font names must be plain lower-case words')
+    return files, terminal[1]
+
+
+def grub_menu(source=None):
+    """The live medium's grub.cfg: themed when graphics work, plain text otherwise."""
+    files, terminal_font = theme_fonts(source)
+    fonts = [f'{THEME_PATH}/{name}' for name in files]
+    lines = [
+        'set default=0', 'set timeout=8', 'set timeout_style=menu',
+        '# Colours of the plain text menu, used whenever the theme is not.',
+        'set color_normal=light-gray/black',
+        'set menu_color_normal=light-gray/black',
+        'set menu_color_highlight=black/cyan',
+        'search --no-floppy --file --set=root /.disk/desos-live-id',
+        'set desos_medium="${root}"',
+        '',
+        '# Serial terminal for QA. GRUB probes the UART: a machine without one',
+        '# gets no serial terminal and no serial kernel console.',
+        'set desos_serial=',
+        'if serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1; then',
+        '    set desos_serial=console=ttyS0,115200n8',
+        'else',
+        '    # Wipe the "serial port not found" line GRUB prints for the probe.',
+        '    clear',
+        'fi',
+        '',
+        '# Graphical menu. Every step may fail (no video mode, damaged medium);',
+        '# any failure leaves the text menu on the firmware console.',
+        'set desos_gfx=0',
+        f'if [ -s {THEME_PATH}/theme.txt ]; then',
+        '    insmod all_video',
+        '    insmod gfxterm',
+        '    insmod gfxterm_background',
+        '    insmod png',
+        '    insmod gfxmenu',
+        '    set gfxmode=auto',
+        '    set gfxpayload=keep',
+        '    if loadfont ' + ' '.join(fonts) + '; then',
+        f'        set gfxterm_font="{terminal_font}"',
+        '        if terminal_output gfxterm; then',
+        '            set desos_gfx=1',
+        '            # The splash ground, so loading a kernel does not flash black.',
+        '            background_color 6,8,11',
+        f'            set theme=($root){THEME_PATH}/theme.txt',
+        '        fi',
+        '    fi',
+        'fi',
+        'if [ "${desos_gfx}" != 1 ]; then',
+        '    terminal_output console',
+        'fi',
+        'terminal_input console',
+        'if [ -n "${desos_serial}" ]; then',
+        '    terminal_input --append serial',
+        '    terminal_output --append serial',
+        'fi',
+        '']
+    for entry, icon, title, description, kernel, extra in LIVE_ENTRIES:
+        lines.extend([f'menuentry "{title} - {description}" --id {entry} --class {icon} {{',
+                      f'    linux /casper/vmlinuz-{kernel} {CASPER}{extra}',
                       f'    initrd /casper/initrd-{kernel}', '}', ''])
+    lines.extend([
+        '# Leave the live medium. UEFI: returning to the firmware continues with its',
+        '# next boot entry. BIOS: chainload the first disk that is not this medium',
+        '# (a USB stick is itself hd0, so the internal disk is then hd1).',
+        'if [ "${grub_platform}" = efi ]; then',
+        '    menuentry "Boot from first hard disk - continue with the next firmware boot entry" --id desos-disk --class disk {',
+        '        exit 1',
+        '    }',
+        '    insmod efifwsetup',
+        '    if fwsetup --is-supported; then',
+        '        menuentry "UEFI firmware settings - restart into setup" --id desos-firmware --class firmware {',
+        '            fwsetup',
+        '        }',
+        '    fi',
+        'else',
+        '    menuentry "Boot from first hard disk - start what is already installed" --id desos-disk --class disk {',
+        '        insmod chain',
+        '        insmod regexp',
+        '        set desos_disk=',
+        '        regexp --set=1:desos_disk \'^(hd[0-9]+)\' "${desos_medium}"',
+        '        if [ "${desos_disk}" = hd0 ]; then',
+        '            insmod drivemap',
+        '            drivemap -s (hd0) (hd1)',
+        '            set root=(hd1)',
+        '        else',
+        '            set root=(hd0)',
+        '        fi',
+        '        # A boot sector expects the BIOS text mode, not the graphics mode of the menu.',
+        '        terminal_output console',
+        '        chainloader +1',
+        '    }',
+        'fi',
+        ''])
     return '\n'.join(lines)
+
+
+def stage_theme(stage, source=None):
+    """Copy the theme onto the medium; a missing theme is a build error, not a text menu."""
+    source = THEME_SOURCE if source is None else source
+    theme_fonts(source)
+    target = stage / THEME_PATH.lstrip('/')
+    for path in sorted(source.rglob('*')):
+        if path.is_symlink():
+            raise ValueError('boot theme must not contain symlinks: ' + path.name)
+        destination = target / path.relative_to(source)
+        if path.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, destination)
+    return target
 
 
 def copy_uuid(extraction, disk, flavor):
@@ -181,8 +308,9 @@ def prepare(root, stage):
     for directory in ('casper', 'boot/grub', '.disk'):
         (stage / directory).mkdir(parents=True, exist_ok=True)
     (stage / 'boot/grub/grub.cfg').write_text(grub_menu())
-    (stage / '.disk/desos-live-id').write_text('DesOS 0.1 Preview\n')
-    (stage / '.disk/info').write_text('DesOS 0.1 Preview amd64\n')
+    stage_theme(stage)
+    (stage / '.disk/desos-live-id').write_text(RELEASE + '\n')
+    (stage / '.disk/info').write_text(RELEASE + ' amd64\n')
     (stage / '.disk/base_installable').touch()
     (stage / '.disk/cd_type').write_text('full_cd/single\n')
     return selected

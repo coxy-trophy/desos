@@ -10,13 +10,17 @@ systemd-detect-virt --vm --quiet || { echo 'VM worker required' >&2; exit 2; }
 [[ -f /etc/desos-build-worker ]] || { echo 'Missing worker marker' >&2; exit 2; }
 source /etc/os-release
 [[ ${ID:-} == ubuntu ]] || { echo 'Ubuntu image worker required' >&2; exit 2; }
-for tool in python3 chroot update-initramfs unmkinitramfs mksquashfs grub-mkrescue xorriso mformat mount umount; do
+for tool in python3 chroot update-initramfs unmkinitramfs mksquashfs grub-mkrescue grub-script-check xorriso mformat mount umount; do
     command -v "$tool" >/dev/null || { echo "Missing ISO build tool: $tool" >&2; exit 2; }
 done
 [[ -f /usr/lib/grub/i386-pc/cdboot.img && -f /usr/lib/grub/x86_64-efi/modinfo.sh ]] || {
     echo 'Both grub-pc-bin and grub-efi-amd64-bin are required' >&2; exit 2;
 }
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# The boot menu theme is staged from the recipe checkout, not from the rootfs.
+[[ -f $here/../boot-theme/rootfs/boot/grub/themes/desos/theme.txt ]] || {
+    echo 'Missing boot theme: boot-theme/rootfs/boot/grub/themes/desos (run boot-theme/generate.py)' >&2; exit 2;
+}
 root=$(realpath -m -- "$1")
 output=$(realpath -m -- "$2")
 # The helper also checks identity, privacy seal, package integration and modules.
@@ -30,6 +34,9 @@ if [[ -e $stage || -e $iso ]]; then
     exit 2
 fi
 selection=$(python3 "$here/iso_recipe.py" prepare --root "$root" --output "$output" --stage "$stage")
+# The menu and its theme are staged by prepare; refuse a menu GRUB cannot parse.
+grub-script-check "$stage/boot/grub/grub.cfg"
+[[ -f $stage/boot/grub/themes/desos/theme.txt ]] || { echo 'Boot theme was not staged' >&2; exit 1; }
 upstream=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["upstream"])' "$selection")
 compat=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["compat"])' "$selection")
 mounts=()

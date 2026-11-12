@@ -20,6 +20,9 @@ Calamares launcher, Casper and initramfs-tools, and provide both:
 The worker needs `squashfs-tools`, `initramfs-tools-core`, `grub-common`,
 `grub-pc-bin`, `grub-efi-amd64-bin`, `xorriso`, `mtools`, Python 3 and ordinary
 core/mount tools. The rootfs needs its own working `update-initramfs`.
+The recipe checkout must include `boot-theme/` beside `image/`: the menu theme is
+staged from `boot-theme/rootfs/boot/grub/themes/desos`, and the build refuses to
+start without it or with a menu that fails `grub-script-check`.
 
 Seal the rootfs before invocation: remove SSH host private keys and random
 seeds, empty/uninitialize machine IDs, audit copied credentials, and unmount
@@ -85,21 +88,65 @@ GRUB MBR/EFI integration and active-partition semantics. A post-construction xor
 boot platforms, hybrid MBR/GPT metadata and a bootable MBR entry. The actual
 report is retained for review. Secure Boot is not configured or certified.
 
-GRUB provides four explicit choices:
+GRUB shows the DesOS boot theme (`boot-theme/`, staged to
+`/boot/grub/themes/desos` on the medium; a missing theme fails `prepare`). The
+menu has these entries, each titled `Name - what it does`:
 
 1. **Try DesOS**, default after eight seconds, upstream kernel.
 2. **Install DesOS**, upstream kernel, adds only `desos.install=1`.
 3. **Compatibility: Ubuntu kernel**, matched Ubuntu kernel/initrd.
 4. **Debug DesOS upstream**, verbose boot diagnostics.
+5. **Boot from first hard disk**. UEFI: `exit 1`, so the firmware continues
+   with its next boot entry. BIOS: chainloads the first disk that is not the
+   live medium. A USB stick is `hd0` to the BIOS, so the entry then swaps
+   `hd0`/`hd1` with `drivemap` and starts `hd1`; from optical media it starts
+   `hd0`. It returns to the firmware console first, because a boot sector
+   expects the BIOS text mode.
+6. **UEFI firmware settings**, only on UEFI and only when
+   `fwsetup --is-supported` succeeds.
 
-Each entry uses `boot=casper live-media-path=casper username=desos
-hostname=desos-live nopersistent console=tty0 console=ttyS0,115200n8`.
-Try, Install and Compatibility also use `quiet splash` for the native Plymouth
-boot screen. Install differs from Try only by `desos.install=1`. Debug omits
-`quiet splash` and adds `debug loglevel=7 systemd.show_status=1`.
-GRUB also enables a 115200-baud serial terminal for QA. The rootfs owns graphical
-live autologin and the standard serial login/getty configuration. The recipe
-contains no automatic disk installation or wipe behavior.
+### Graphics and fallback
+
+`grub.cfg` enables the theme only when `theme.txt` exists on the medium, all
+theme fonts load and `terminal_output gfxterm` succeeds, in that order. Any
+failure leaves the standard text menu on the firmware console (light grey,
+cyan highlight). The mode is `gfxmode=auto` with `gfxpayload=keep`, and the
+graphical terminal is filled with the splash ground (`background_color
+6,8,11`), so the screen does not flash black between the menu and Plymouth.
+
+### Consoles
+
+Entries 1 to 4 use `boot=casper live-media-path=casper username=desos
+hostname=desos-live nopersistent ${desos_serial} console=tty0`.
+Try, Install and Compatibility add `quiet splash
+plymouth.ignore-serial-consoles`. Install differs from Try only by
+`desos.install=1`. Debug omits `quiet splash` and adds `debug loglevel=7
+systemd.show_status=1`.
+
+Earlier revisions ended every entry with `console=tty0
+console=ttyS0,115200n8`. The last `console=` becomes `/dev/console`, so on
+ordinary hardware service output and the emergency shell went to a serial port
+nobody was watching, and Plymouth, seeing a serial console, dropped the
+graphical splash. Now:
+
+- GRUB runs `serial --unit=0 --speed=115200 ...` inside an `if`. Its driver
+  tests the UART's scratch register, so on a machine without one the command
+  fails: no serial terminal is added and `${desos_serial}` stays empty (an
+  empty unquoted variable adds no kernel argument).
+- With a UART, GRUB adds the serial terminal beside the screen (QA sees the
+  text menu on the serial line) and passes `console=ttyS0,115200n8` to the
+  kernel: kernel messages and a serial login reach QA as before.
+- `console=tty0` is always last, so `/dev/console` is the display on every
+  machine, including one whose UART exists but is not connected.
+- `plymouth.ignore-serial-consoles` keeps the graphical splash when the
+  serial console is present.
+
+For QA the difference from before is that `/dev/console` output (systemd
+status lines, an emergency shell) is on the display, not on the serial line.
+The kernel log, including systemd's messages under `debug`, and the serial
+getty are unchanged. The rootfs owns graphical live autologin and the standard
+serial login/getty configuration. The recipe contains no automatic disk
+installation or wipe behavior.
 
 ## Artifacts and verification boundary
 
@@ -114,7 +161,8 @@ Output contains:
 
 The ISO includes `/casper/filesystem.manifest`, `filesystem.manifest-desktop`,
 `filesystem.size`, both kernel/initrd pairs, `.disk` identity/UUID markers,
-`/boot/grub/grub.cfg` and `/md5sum.txt`. The MD5 list supports Casper media
+`/boot/grub/grub.cfg`, the boot theme under `/boot/grub/themes/desos` and
+`/md5sum.txt`. The MD5 list supports Casper media
 checking; SHA256 sidecars/provenance support artifact integrity. Bootloader
 files added internally by grub-mkrescue are outside the prebuilt MD5 list.
 
@@ -126,7 +174,10 @@ bash -n image/build-iso.sh
 python3 -m py_compile image/iso_recipe.py
 ```
 
-These validate command/menu/path/UUID contracts. Parent must still construct
+These validate command/menu/path/UUID contracts and run `grub-script-check`
+over the generated menu when it is installed. `boot-theme/tools/preview.py`
+boots the generated menu in a GRUB-only BIOS QEMU for a visual check; it does
+not replace booting the ISO. Parent must still construct
 the ISO in the worker, inspect the hybrid partition report, boot it using both
 BIOS and UEFI, confirm DesOS/live desktop/input/network/kernel identities, run
 Calamares against a disposable empty VM disk, and boot the installed system.

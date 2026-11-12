@@ -1,0 +1,27 @@
+#!/bin/sh
+# DesOS boot menu: what the theme file cannot express. Runs after
+# 05_debian_theme so its plain-menu colours win, and before the menu entries.
+set -e
+
+# The plain text menu (theme missing, GRUB_TERMINAL=console, serial) in the
+# DesOS colours instead of the base distribution's.
+cat << 'EOF'
+set color_normal=light-gray/black
+set menu_color_normal=light-gray/black
+set menu_color_highlight=black/cyan
+EOF
+
+case " ${GRUB_TERMINAL_OUTPUT:-gfxterm} " in
+    *" gfxterm "*)
+        # Fill the graphical terminal with the splash ground (#06080b) so that
+        # leaving the menu to load a kernel does not flash black, and keep the
+        # unicode font as a fallback for glyphs the theme fonts do not have.
+        cat << 'EOF'
+if [ -s $prefix/fonts/unicode.pf2 ]; then
+  loadfont unicode
+fi
+insmod gfxterm_background
+background_color 6,8,11
+EOF
+        ;;
+esac
