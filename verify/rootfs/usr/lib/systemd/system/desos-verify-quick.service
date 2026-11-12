@@ -1,0 +1,26 @@
+[Unit]
+Description=DesOS integrity check (quick, every boot)
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=greetd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/desos-verify --quick --write --quiet
+TimeoutStartSec=60
+Nice=10
+# The check only reads the system and writes its two result directories.
+ProtectSystem=strict
+ReadWritePaths=/run/desos /var/lib/desos
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+LockPersonality=yes
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

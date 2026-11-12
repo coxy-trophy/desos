@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the full DesOS integrity check after boot and daily
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1d
+RandomizedDelaySec=5min
+AccuracySec=1min
+Unit=desos-verify-full.service
+
+[Install]
+WantedBy=timers.target

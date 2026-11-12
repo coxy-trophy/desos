@@ -1,0 +1,1226 @@
+#!/usr/bin/python3
+"""desos-verify: check the running DesOS system against its signed build evidence.
+
+Every check reports pass, fail or unknown with a one-line reason. The trust
+chain starts at the archive key shipped in the image, so a pass means "this
+system is consistent with what that key signed", not "this system is
+untampered": see /usr/share/doc or verify/README.md for the threat model.
+
+Python 3 standard library only; shells out to gpgv and dpkg-deb.
+"""
+import argparse
+import base64
+import binascii
+from datetime import datetime, timezone
+from email.parser import Parser
+import fnmatch
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from urllib.parse import urlsplit
+
+SCHEMA = 'desos-verify-v1'
+TOOL_VERSION = 1
+PASS, FAIL, UNKNOWN = 'pass', 'fail', 'unknown'
+FULL_ONLY = ('repository.pool', 'packages.files')
+QUICK_DEB_LIMIT = 8 * 1024 * 1024
+LIST_LIMIT = 20
+ASSURANCE = ('self-reported by software on the system being checked; without measured '
+             'or verified boot a root-level attacker can forge this result')
+
+# Every path the tool touches, relative to the injectable root.
+DEFAULT_PATHS = {
+    'repository': 'usr/share/desos/repository',
+    'key': 'usr/share/keyrings/desos-archive-keyring.asc',
+    'evidence': 'usr/share/doc/desos/build',
+    'dpkg': 'var/lib/dpkg',
+    'dpkg_cfg': 'etc/dpkg',
+    'os_release': 'etc/os-release',
+    'apt': 'etc/apt',
+    'boot': 'boot',
+    'live_media': 'cdrom',
+    'osrelease': 'proc/sys/kernel/osrelease',
+    'cmdline': 'proc/cmdline',
+    'mounts': 'proc/mounts',
+    'kconfig': 'proc/config.gz',
+    'boot_id': 'proc/sys/kernel/random/boot_id',
+    'efi': 'sys/firmware/efi',
+    'run_result': 'run/desos/verify.json',
+    'run_status': 'run/desos/verify-status',
+    'full_result': 'var/lib/desos/verify-full.json',
+}
+SECURE_BOOT_VAR = 'efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c'
+UBUNTU_HOSTS = ('archive.ubuntu.com', 'security.ubuntu.com', 'ports.ubuntu.com')
+UBUNTU_KEYRING = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'
+EXPECTED_ROOT_FS = {'installed': ('btrfs', 'ext4'), 'live': ('overlay',)}
+# Removing these breaks the system's identity or desktop; any other DesOS package
+# may be uninstalled by its owner without that counting against integrity.
+REQUIRED_PACKAGES = ('des-ui', 'desos-release')
+
+
+class Runner:
+    """Runs external commands. Tests substitute their own implementation."""
+    ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C', 'TZ': 'UTC'}
+
+    def run(self, argv, env=None, timeout=120):
+        """Return (returncode, stdout bytes, stderr bytes); 127 if missing."""
+        try:
+            done = subprocess.run(argv, env=dict(self.ENV, **(env or {})), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+        except FileNotFoundError:
+            return 127, b'', b'command not found'
+        except subprocess.TimeoutExpired:
+            return 124, b'', b'timed out'
+        return done.returncode, done.stdout, done.stderr
+
+    def stream(self, argv):
+        """Return a started process whose .stdout is a readable byte stream."""
+        return subprocess.Popen(argv, env=dict(self.ENV), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+class Config:
+    def __init__(self, root='/', runner=None, paths=None, now=None, tmpdir=None,
+                 offline=None, expect_fingerprint=None, key_file=None):
+        self.root = Path(os.path.abspath(str(root)))
+        self.runner = runner or Runner()
+        self.paths = dict(DEFAULT_PATHS, **(paths or {}))
+        self.now = now or time.time
+        self.tmpdir = tmpdir
+        # Offline: checking a mounted system from other media; no running-kernel facts.
+        self.offline = (str(self.root) != '/') if offline is None else offline
+        self.expect_fingerprint = expect_fingerprint.upper().replace(' ', '') if expect_fingerprint else None
+        self.key_file = Path(key_file) if key_file else None
+
+    def inroot(self, path, follow=True):
+        """Resolve an in-image path beneath root, keeping absolute symlinks inside it."""
+        parts = [p for p in str(path).split('/') if p not in ('', '.')]
+        current = self.root
+        hops = 0
+        while parts:
+            part = parts.pop(0)
+            if part == '..':
+                if current != self.root:
+                    current = current.parent
+                continue
+            candidate = current / part
+            if (parts or follow) and candidate.is_symlink():
+                hops += 1
+                if hops > 40:
+                    raise OSError('too many symbolic links: ' + str(path))
+                target = os.readlink(candidate)
+                if target.startswith('/'):
+                    current = self.root
+                parts = [p for p in target.split('/') if p not in ('', '.')] + parts
+                continue
+            current = candidate
+        return current
+
+    def path(self, key, *more, follow=True):
+        return self.inroot('/'.join((self.paths[key],) + more), follow=follow)
+
+
+def clean(text, limit=300):
+    """One printable line: results are world-readable and shown by the greeter."""
+    text = ''.join(c if c.isprintable() else '?' for c in str(text).replace('\n', ' '))
+    return text if len(text) <= limit else text[:limit - 3] + '...'
+
+
+def check(identifier, status, reason, **details):
+    return {'id': identifier, 'group': identifier.split('.')[0], 'status': status,
+            'reason': clean(reason), 'details': details}
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(1 << 20), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def hash_stream(stream, algorithm='sha256'):
+    digest = hashlib.new(algorithm)
+    for block in iter(lambda: stream.read(1 << 20), b''):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def read_text(path, limit=4 * 1024 * 1024):
+    with open(path, 'rb') as stream:
+        return stream.read(limit).decode('utf-8', 'replace')
+
+
+def shorten(items):
+    items = [clean(i, 200) for i in items]
+    return items[:LIST_LIMIT] + (['... %d more' % (len(items) - LIST_LIMIT)] if len(items) > LIST_LIMIT else [])
+
+
+def payload_name(name):
+    """Tar member name ('./usr/bin/x') as a path relative to the image root."""
+    return '/'.join(part for part in name.split('/') if part not in ('', '.'))
+
+
+# --- OpenPGP key handling (no keyring but a temporary one is ever used) -----
+
+def dearmor(text):
+    blocks = re.findall(r'-----BEGIN PGP PUBLIC KEY BLOCK-----\r?\n(.*?)-----END PGP PUBLIC KEY BLOCK-----', text, re.S)
+    if len(blocks) != 1:
+        raise ValueError('expected exactly one armored public key block, found %d' % len(blocks))
+    lines = blocks[0].splitlines()
+    if '' in [line.strip() for line in lines]:
+        lines = lines[[line.strip() for line in lines].index('') + 1:]
+    body = ''.join(line.strip() for line in lines if not line.startswith('='))
+    try:
+        return base64.b64decode(body, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError('public key armor is not valid base64') from error
+
+
+def primary_fingerprints(data):
+    """Fingerprints of every primary public key packet in binary OpenPGP data."""
+    found = []
+    offset = 0
+    while offset < len(data):
+        first = data[offset]
+        if not first & 0x80:
+            raise ValueError('malformed OpenPGP packet')
+        offset += 1
+        if first & 0x40:
+            tag = first & 0x3f
+            length = data[offset]
+            offset += 1
+            if 192 <= length < 224:
+                length = ((length - 192) << 8) + data[offset] + 192
+                offset += 1
+            elif length == 255:
+                length = int.from_bytes(data[offset:offset + 4], 'big')
+                offset += 4
+            elif length >= 224:
+                raise ValueError('partial-length key packets are not supported')
+        else:
+            tag = (first >> 2) & 0x0f
+            size = (1, 2, 4)[first & 3] if first & 3 != 3 else None
+            if size is None:
+                raise ValueError('indeterminate-length key packets are not supported')
+            length = int.from_bytes(data[offset:offset + size], 'big')
+            offset += size
+        body = data[offset:offset + length]
+        if len(body) != length:
+            raise ValueError('truncated OpenPGP packet')
+        offset += length
+        if tag == 6:
+            if body[:1] == b'\x04':
+                found.append(hashlib.sha1(b'\x99' + len(body).to_bytes(2, 'big') + body).hexdigest().upper())
+            elif body[:1] in (b'\x05', b'\x06'):
+                prefix = b'\x9a' if body[:1] == b'\x05' else b'\x9b'
+                found.append(hashlib.sha256(prefix + len(body).to_bytes(4, 'big') + body).hexdigest().upper())
+            else:
+                raise ValueError('unsupported public key version')
+    return found
+
+
+# --- Small parsers ----------------------------------------------------------
+
+def parse_stanzas(text):
+    """Deb822 paragraphs as lists of (field, value) dictionaries; comments dropped."""
+    stanzas = []
+    for block in re.split(r'\n\s*\n', text):
+        block = '\n'.join(line for line in block.splitlines() if not line.startswith('#'))
+        if block.strip():
+            message = Parser().parsestr(block)
+            stanzas.append({key.lower(): value for key, value in message.items()})
+    return stanzas
+
+
+def parse_status(text):
+    """dpkg status database -> {package: [raw stanza text, ...]}; parsed on demand."""
+    packages = {}
+    for block in re.split(r'\n\s*\n', text):
+        match = re.search(r'^Package: *(\S+)', block, re.M)
+        if match:
+            packages.setdefault(match.group(1), []).append(block)
+    return packages
+
+
+def parse_os_release(text):
+    values = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r'\s*([A-Z0-9_]+)=(.*)', line)
+        if match:
+            value = match.group(2).strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+                value = value[1:-1]
+            values[match.group(1)] = value
+    return values
+
+
+def parse_apt_sources(apt_dir):
+    """Enabled binary apt sources as dictionaries; unreadable files raise OSError."""
+    entries = []
+    files = []
+    single = apt_dir / 'sources.list'
+    if single.is_file():
+        files.append(single)
+    parts = apt_dir / 'sources.list.d'
+    if parts.is_dir():
+        files += sorted(p for p in parts.iterdir() if p.suffix in ('.list', '.sources') and p.is_file())
+    for path in files:
+        text = read_text(path)
+        if path.suffix == '.sources':
+            for stanza in parse_stanzas(text):
+                if stanza.get('enabled', 'yes').strip().lower() in ('no', 'false', '0'):
+                    continue
+                if 'deb' not in stanza.get('types', '').split():
+                    continue
+                entries.append({'file': path.name, 'uris': stanza.get('uris', '').split(),
+                                'suites': stanza.get('suites', '').split(),
+                                'components': stanza.get('components', '').split(),
+                                'signed_by': stanza.get('signed-by', '').strip(),
+                                'insecure': any(stanza.get(k, 'no').strip().lower() in ('yes', 'true', '1')
+                                                for k in ('trusted', 'allow-insecure', 'allow-weak'))})
+        else:
+            for line in text.splitlines():
+                line = line.split('#', 1)[0].strip()
+                match = re.fullmatch(r'deb\s+(?:\[([^\]]*)\]\s+)?(\S+)\s+(\S+)(.*)', line)
+                if not match:
+                    continue
+                options = dict(item.split('=', 1) for item in (match.group(1) or '').split() if '=' in item)
+                entries.append({'file': path.name, 'uris': [match.group(2)], 'suites': [match.group(3)],
+                                'components': match.group(4).split(),
+                                'signed_by': options.get('signed-by', ''),
+                                'insecure': any(options.get(k, 'no').lower() in ('yes', 'true', '1')
+                                                for k in ('trusted', 'allow-insecure', 'allow-weak'))})
+    return entries
+
+
+class Verifier:
+    def __init__(self, config, full=False):
+        self.cfg = config
+        self.full = full
+        self.results = []
+        self.manifest = None          # only set once its signature verified
+        self.manifest_sha256 = None
+        self.fingerprint = None
+        self.keyring = None
+        self.work = None
+        self.status_db = None
+        self.deb_state = {}           # package -> (ok, reason)
+        self.payload = {}             # package -> {relative path: (kind, value, mode)}
+        self.state = {'kernel': 'unknown', 'kernel_release': None, 'secure_boot': 'unknown',
+                      'root_filesystem': None, 'session': 'unknown'}
+
+    def add(self, *args, **kwargs):
+        self.results.append(check(*args, **kwargs))
+
+    def guarded(self, identifier, function):
+        """A check that crashes is reported as unknown, never silently dropped."""
+        try:
+            function()
+        except Exception as error:  # noqa: BLE001 - the report must always be complete
+            self.results = [r for r in self.results if r['id'] != identifier]
+            self.add(identifier, UNKNOWN, 'check could not run: %s: %s' % (type(error).__name__, error))
+
+    # --- signatures ---------------------------------------------------------
+
+    def gpgv(self, signature, data=None, output=None):
+        """Verify with the isolated keyring; return (primary fingerprint or None, reason)."""
+        argv = ['gpgv', '--homedir', str(self.work), '--keyring', str(self.keyring), '--status-fd', '1']
+        if output is not None:
+            argv += ['--output', str(output)]
+        argv.append(str(signature))
+        if data is not None:
+            argv.append(str(data))
+        code, out, err = self.cfg.runner.run(argv, env={'GNUPGHOME': str(self.work), 'HOME': str(self.work)})
+        if code == 127:
+            return None, 'gpgv is not installed'
+        lines = [l.split() for l in out.decode('utf-8', 'replace').splitlines() if l.startswith('[GNUPG:] ')]
+        names = [l[1] for l in lines if len(l) > 1]
+        valid = [l[-1].upper() for l in lines if len(l) >= 12 and l[1] == 'VALIDSIG']
+        bad = sorted(set(names) & {'BADSIG', 'ERRSIG', 'EXPSIG', 'EXPKEYSIG', 'REVKEYSIG', 'NO_PUBKEY'})
+        if code != 0 or bad or len(valid) != 1 or 'GOODSIG' not in names:
+            return None, 'gpgv rejected the signature (%s)' % (', '.join(bad) or 'exit %d' % code)
+        return valid[0], 'valid'
+
+    def check_key(self):
+        source = self.cfg.key_file or self.cfg.path('key')
+        if not source.is_file():
+            return self.add('signatures.key', FAIL, 'archive key %s is missing' % source)
+        try:
+            binary = dearmor(read_text(source))
+            prints = primary_fingerprints(binary)
+        except ValueError as error:
+            return self.add('signatures.key', FAIL, 'archive key is unusable: %s' % error)
+        if len(prints) != 1:
+            return self.add('signatures.key', FAIL,
+                            'archive key file holds %d primary keys; exactly one is expected' % len(prints))
+        self.keyring = self.work / 'desos-archive.gpg'
+        self.keyring.write_bytes(binary)
+        self.fingerprint = prints[0]
+        details = {'fingerprint': prints[0], 'key_file': str(source), 'key_sha256': hashlib.sha256(
+            source.read_bytes()).hexdigest(), 'pinned': self.cfg.expect_fingerprint is not None}
+        if self.cfg.expect_fingerprint and self.cfg.expect_fingerprint != prints[0]:
+            self.keyring = None
+            return self.add('signatures.key', FAIL, 'archive key fingerprint %s is not the expected %s'
+                            % (prints[0], self.cfg.expect_fingerprint), **details)
+        note = ('matches the fingerprint supplied by the caller' if self.cfg.expect_fingerprint else
+                'taken from the system itself; compare it with a fingerprint obtained elsewhere')
+        self.add('signatures.key', PASS, 'archive key %s (%s)' % (prints[0], note), **details)
+
+    def check_manifest(self):
+        repo = self.cfg.path('repository')
+        manifest, signature = repo / 'manifest.json', repo / 'manifest.json.asc'
+        if self.keyring is None:
+            return self.add('signatures.manifest', UNKNOWN, 'no usable archive key to verify with')
+        if (repo / '.incomplete').exists():
+            return self.add('signatures.manifest', FAIL, 'repository carries an .incomplete build marker')
+        if not manifest.is_file() or not signature.is_file():
+            return self.add('signatures.manifest', FAIL, 'manifest.json or its signature is missing from %s' % repo)
+        signer, reason = self.gpgv(signature, manifest)
+        if signer is None:
+            return self.add('signatures.manifest', UNKNOWN if 'not installed' in reason else FAIL,
+                            'manifest.json: ' + reason)
+        if signer != self.fingerprint:
+            return self.add('signatures.manifest', FAIL, 'manifest.json was signed by %s, not the shipped key' % signer)
+        raw = manifest.read_bytes()
+        try:
+            data = json.loads(raw)
+            listed = data['signing_fingerprint'].upper()
+            packages = data['packages']
+            for entry in packages:
+                if not (re.fullmatch(r'[a-z0-9][a-z0-9+.-]+', entry['package'])
+                        and re.fullmatch(r'[0-9a-f]{64}', entry['sha256'])
+                        and re.fullmatch(r'pool/[A-Za-z0-9+._~/-]+\.deb', entry['pool_path'])
+                        and '..' not in entry['pool_path'] and isinstance(entry['version'], str)):
+                    raise ValueError('unsafe package entry')
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            return self.add('signatures.manifest', FAIL, 'signed manifest.json is not in the expected format: %s' % error)
+        if data.get('schema') != 'desos-component-repository-v1':
+            return self.add('signatures.manifest', UNKNOWN, 'unsupported manifest schema %r' % data.get('schema'))
+        if listed != self.fingerprint:
+            return self.add('signatures.manifest', FAIL, 'manifest names signing key %s, not the shipped key' % listed)
+        self.manifest = data
+        self.manifest_sha256 = hashlib.sha256(raw).hexdigest()
+        self.add('signatures.manifest', PASS, 'manifest.json is signed by the shipped key and lists %d packages'
+                 % len(packages), signer=signer, manifest_sha256=self.manifest_sha256, package_count=len(packages))
+
+    def check_release(self):
+        dists = self.cfg.path('repository') / 'dists/desos'
+        release, detached, inline = dists / 'Release', dists / 'Release.gpg', dists / 'InRelease'
+        if self.keyring is None:
+            return self.add('signatures.release', UNKNOWN, 'no usable archive key to verify with')
+        if not all(p.is_file() for p in (release, detached, inline)):
+            return self.add('signatures.release', FAIL, 'Release, Release.gpg or InRelease is missing')
+        for label, arguments in (('Release.gpg', (detached, release, None)),
+                                 ('InRelease', (inline, None, self.work / 'InRelease.text'))):
+            signer, reason = self.gpgv(*arguments)
+            if signer is None:
+                return self.add('signatures.release', UNKNOWN if 'not installed' in reason else FAIL,
+                                '%s: %s' % (label, reason))
+            if signer != self.fingerprint:
+                return self.add('signatures.release', FAIL, '%s was signed by %s, not the shipped key' % (label, signer))
+        signed = [l.rstrip() for l in read_text(self.work / 'InRelease.text').strip().splitlines()]
+        plain = [l.rstrip() for l in read_text(release).strip().splitlines()]
+        if signed != plain:
+            return self.add('signatures.release', FAIL, 'the text signed inside InRelease differs from Release')
+        self.release_ok = True
+        self.add('signatures.release', PASS, 'Release.gpg and InRelease are signed by the shipped key and agree',
+                 signer=self.fingerprint)
+
+    # --- repository ---------------------------------------------------------
+
+    def need_manifest(self, identifier):
+        if self.manifest is None:
+            self.add(identifier, UNKNOWN, 'the signed manifest could not be verified, so there is nothing to compare with')
+            return False
+        return True
+
+    def check_index(self):
+        if not self.need_manifest('repository.index'):
+            return
+        repo = self.cfg.path('repository')
+        problems = []
+        for name, record in sorted(self.manifest.get('artifacts', {}).items()):
+            path = self.cfg.inroot(self.cfg.paths['repository'] + '/' + name)
+            if not path.is_file():
+                problems.append('%s is missing' % name)
+            elif sha256_file(path) != record.get('sha256'):
+                problems.append('%s differs from the signed manifest' % name)
+        key = self.cfg.key_file or self.cfg.path('key')
+        if key.is_file() and (repo / 'desos-archive-keyring.asc').is_file() and \
+                sha256_file(key) != sha256_file(repo / 'desos-archive-keyring.asc'):
+            problems.append('trusted keyring differs from the copy inside the repository')
+        index = repo / 'dists/desos/main/binary-amd64/Packages'
+        if index.is_file():
+            if getattr(self, 'release_ok', False):
+                digest = sha256_file(index)
+                release = read_text(repo / 'dists/desos/Release')
+                if not re.search(r'^ %s +%d main/binary-amd64/Packages$' % (digest, index.stat().st_size), release, re.M):
+                    problems.append('signed Release does not list the present Packages index')
+            listed = {(s.get('package'), s.get('version')): s for s in parse_stanzas(read_text(index))}
+            wanted = {(p['package'], p['version']): p for p in self.manifest['packages']}
+            for identity in sorted(set(listed) ^ set(wanted)):
+                problems.append('%s %s is not in both the manifest and the Packages index' % identity)
+            for identity in sorted(set(listed) & set(wanted)):
+                if listed[identity].get('sha256') != wanted[identity]['sha256'] or \
+                        listed[identity].get('filename') != wanted[identity]['pool_path']:
+                    problems.append('%s: Packages index and manifest disagree' % identity[0])
+        else:
+            problems.append('Packages index is missing')
+        if problems:
+            return self.add('repository.index', FAIL, '%d repository metadata problem(s): %s'
+                            % (len(problems), '; '.join(problems[:3])), problems=shorten(problems))
+        self.add('repository.index', PASS, 'repository indexes match the signed manifest and Release',
+                 artifacts=len(self.manifest.get('artifacts', {})))
+
+    def verified_deb(self, entry):
+        """(path, None) if the pool .deb matches the signed manifest, else (None, reason)."""
+        name = entry['package']
+        if name not in self.deb_state:
+            path = self.cfg.inroot(self.cfg.paths['repository'] + '/' + entry['pool_path'])
+            if not path.is_file():
+                self.deb_state[name] = (None, 'pool package is missing')
+            elif path.stat().st_size != entry.get('size_bytes', path.stat().st_size):
+                self.deb_state[name] = (None, 'pool package size differs from the signed manifest')
+            elif sha256_file(path) != entry['sha256']:
+                self.deb_state[name] = (None, 'pool package SHA-256 differs from the signed manifest')
+            else:
+                self.deb_state[name] = (path, None)
+        return self.deb_state[name]
+
+    def check_pool(self):
+        if not self.need_manifest('repository.pool'):
+            return
+        bad = ['%s: %s' % (e['package'], self.verified_deb(e)[1]) for e in self.manifest['packages']
+               if self.verified_deb(e)[0] is None]
+        size = sum(e.get('size_bytes', 0) for e in self.manifest['packages'])
+        if bad:
+            return self.add('repository.pool', FAIL, '%d shipped package(s) do not match the signed manifest: %s'
+                            % (len(bad), '; '.join(bad[:3])), problems=shorten(bad))
+        self.add('repository.pool', PASS, 'all %d shipped packages match their signed SHA-256'
+                 % len(self.manifest['packages']), bytes_hashed=size)
+
+    # --- packages -----------------------------------------------------------
+
+    def dpkg_status(self):
+        if self.status_db is None:
+            self.status_db = parse_status(read_text(self.cfg.path('dpkg') / 'status', limit=256 * 1024 * 1024))
+        return self.status_db
+
+    def installed(self, name, architecture=None):
+        for stanza in parse_stanzas('\n\n'.join(self.dpkg_status().get(name, []))):
+            if stanza.get('status', '').split()[-1:] == ['installed'] and \
+                    (architecture in (None, 'all') or stanza.get('architecture') in (architecture, 'all')):
+                return stanza
+        return None
+
+    def check_installed(self):
+        if not self.need_manifest('packages.installed'):
+            return
+        try:
+            self.dpkg_status()
+        except OSError as error:
+            return self.add('packages.installed', UNKNOWN, 'dpkg status database is unreadable: %s' % error)
+        problems, versions, removed = [], {}, []
+        for entry in self.manifest['packages']:
+            stanza = self.installed(entry['package'], entry.get('architecture'))
+            if stanza is None and entry['package'] not in REQUIRED_PACKAGES:
+                removed.append(entry['package'])
+            elif stanza is None:
+                problems.append('%s is not installed' % entry['package'])
+            elif stanza.get('status') != 'install ok installed':
+                problems.append('%s is in dpkg state "%s"' % (entry['package'], stanza.get('status')))
+            elif stanza.get('version') != entry['version']:
+                problems.append('%s is at %s, manifest has %s' % (entry['package'], stanza.get('version'), entry['version']))
+            versions[entry['package']] = stanza.get('version') if stanza else None
+        if problems:
+            return self.add('packages.installed', FAIL, '%d of %d DesOS packages differ from the manifest: %s' % (
+                len(problems), len(versions), '; '.join(problems[:3])), problems=shorten(problems), versions=versions)
+        if removed:
+            return self.add('packages.installed', PASS, '%d DesOS packages are at their manifest versions; '
+                            '%d optional removed: %s' % (len(versions) - len(removed), len(removed),
+                                                         ', '.join(removed[:3])), versions=versions, removed=removed)
+        self.add('packages.installed', PASS, 'all %d DesOS packages are installed at their manifest versions'
+                 % len(versions), versions=versions)
+
+    def walk_deb(self, entry, deb):
+        """Stream the .deb payload once: {relative path: (kind, value, mode, size)}."""
+        name = entry['package']
+        if name in self.payload:
+            return self.payload[name]
+        members = {}
+        process = self.cfg.runner.stream(['dpkg-deb', '--fsys-tarfile', str(deb)])
+        try:
+            with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
+                for member in archive:
+                    relative = payload_name(member.name)
+                    if not relative:
+                        continue
+                    if '..' in relative.split('/'):
+                        raise ValueError('package payload contains an unsafe path')
+                    if member.isreg():
+                        members[relative] = ('file', hash_stream(archive.extractfile(member)),
+                                             member.mode & 0o7777, member.size)
+                    elif member.issym():
+                        members[relative] = ('link', member.linkname, None, 0)
+                    elif member.islnk():
+                        target = members.get(payload_name(member.linkname))
+                        if target:
+                            members[relative] = target
+                    elif member.isdir():
+                        members[relative] = ('dir', None, None, 0)
+        finally:
+            process.stdout.close()
+            code = process.wait()
+        if code != 0:
+            raise OSError('dpkg-deb could not read %s (exit %d)' % (deb.name, code))
+        self.payload[name] = members
+        return members
+
+    def diversions(self):
+        path = self.cfg.path('dpkg') / 'diversions'
+        lines = read_text(path).splitlines() if path.is_file() else []
+        return {lines[i]: (lines[i + 1], lines[i + 2]) for i in range(0, len(lines) - 2, 3)}
+
+    def path_excludes(self):
+        """dpkg path-exclude/path-include rules; excluded files are legitimately absent."""
+        rules = []
+        base = self.cfg.path('dpkg_cfg')
+        files = [base / 'dpkg.cfg'] + (sorted((base / 'dpkg.cfg.d').iterdir()) if (base / 'dpkg.cfg.d').is_dir() else [])
+        for path in files:
+            if path.is_file():
+                for line in read_text(path).splitlines():
+                    match = re.fullmatch(r'\s*(?:--)?path-(exclude|include)\s*[= ]\s*(\S+)\s*', line)
+                    if match:
+                        rules.append((match.group(1) == 'exclude', match.group(2)))
+        def excluded(absolute):
+            verdict = False
+            for exclude, pattern in rules:
+                if fnmatch.fnmatchcase(absolute, pattern):
+                    verdict = exclude
+            return verdict
+        return excluded
+
+    def compare_installed(self, entry, members, diversions, excluded, report):
+        name = entry['package']
+        stanza = self.installed(name, entry.get('architecture')) or {}
+        conffiles = {line.split()[0] for line in stanza.get('conffiles', '').splitlines() if line.strip()}
+        for relative, (kind, value, mode, size) in sorted(members.items()):
+            if kind == 'dir':
+                continue
+            absolute = '/' + relative
+            target = absolute
+            if absolute in diversions and diversions[absolute][1] != name:
+                target = diversions[absolute][0]
+            try:
+                path = self.cfg.inroot(target, follow=False)
+                info = os.lstat(path)
+            except FileNotFoundError:
+                if excluded(absolute):
+                    report['excluded'] += 1
+                elif absolute in conffiles:
+                    report['conffiles_changed'].append(absolute)
+                else:
+                    report['missing'].append(absolute)
+                continue
+            except OSError as error:
+                report['unreadable'].append('%s (%s)' % (absolute, error.strerror))
+                continue
+            try:
+                if kind == 'link':
+                    same = stat.S_ISLNK(info.st_mode) and os.readlink(path) == value
+                else:
+                    same = stat.S_ISREG(info.st_mode) and info.st_size == size and sha256_file(path) == value
+                    report['bytes'] += size
+            except OSError as error:
+                report['unreadable'].append('%s (%s)' % (absolute, error.strerror))
+                continue
+            report['files'] += 1
+            if not same:
+                report['conffiles_changed' if absolute in conffiles else 'modified'].append(absolute)
+            elif kind == 'file' and stat.S_IMODE(info.st_mode) != mode:
+                report['mode_changed'].append('%s (%04o, package has %04o)' % (absolute, stat.S_IMODE(info.st_mode), mode))
+
+    def check_files(self):
+        if not self.need_manifest('packages.files'):
+            return
+        diversions, excluded = self.diversions(), self.path_excludes()
+        per_package, failed, unknown = {}, [], []
+        for entry in self.manifest['packages']:
+            name = entry['package']
+            report = {'files': 0, 'bytes': 0, 'modified': [], 'missing': [], 'mode_changed': [],
+                      'conffiles_changed': [], 'unreadable': [], 'excluded': 0}
+            started = time.monotonic()
+            deb, reason = self.verified_deb(entry)
+            if deb is None:
+                failed.append('%s: %s' % (name, reason))
+                per_package[name] = {'error': reason}
+                continue
+            if self.installed(name, entry.get('architecture')) is None:
+                per_package[name] = {'error': 'not installed'}
+                if name in REQUIRED_PACKAGES:
+                    failed.append('%s: not installed' % name)
+                continue
+            try:
+                members = self.walk_deb(entry, deb)
+            except (OSError, ValueError, tarfile.TarError) as error:
+                unknown.append('%s: %s' % (name, error))
+                per_package[name] = {'error': clean(error)}
+                continue
+            self.compare_installed(entry, members, diversions, excluded, report)
+            for key in ('modified', 'missing', 'mode_changed'):
+                failed += ['%s: %s %s' % (name, key.replace('_', ' '), item) for item in report[key]]
+            unknown += ['%s: unreadable %s' % (name, item) for item in report['unreadable']]
+            per_package[name] = {k: (shorten(v) if isinstance(v, list) else v) for k, v in report.items()}
+            per_package[name]['seconds'] = round(time.monotonic() - started, 2)
+        files = sum(p.get('files', 0) for p in per_package.values())
+        details = {'method': 'SHA-256 of each installed file against the payload of the signature-checked .deb',
+                   'packages': per_package, 'files': files}
+        if failed:
+            return self.add('packages.files', FAIL, '%d installed file problem(s): %s'
+                            % (len(failed), '; '.join(failed[:3])), problems=shorten(failed), **details)
+        if unknown:
+            return self.add('packages.files', UNKNOWN, '%d file(s) could not be checked: %s'
+                            % (len(unknown), '; '.join(unknown[:3])), problems=shorten(unknown), **details)
+        changed = sum(len(p.get('conffiles_changed', [])) for p in per_package.values())
+        self.add('packages.files', PASS, '%d installed files of %d packages match the signed packages%s' % (
+            files, len(per_package), ' (%d locally changed configuration file(s) not counted)' % changed if changed else ''),
+            **details)
+
+    # --- kernel -------------------------------------------------------------
+
+    def load_provenance(self):
+        path = self.cfg.path('evidence') / 'kernel-provenance.json'
+        data = json.loads(read_text(path))
+        release = data['kernel_release']
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.+_~-]*', release):
+            raise ValueError('unsafe kernel_release')
+        return data
+
+    def image_entry(self, provenance):
+        wanted = 'linux-image-' + provenance['kernel_release']
+        return next((e for e in (self.manifest or {}).get('packages', []) if e['package'] == wanted), None)
+
+    def check_provenance(self):
+        self.provenance = None
+        try:
+            provenance = self.load_provenance()
+        except FileNotFoundError:
+            return self.add('kernel.provenance', FAIL, 'kernel-provenance.json is missing from the build evidence')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return self.add('kernel.provenance', FAIL, 'kernel-provenance.json is unusable: %s' % error)
+        if not self.need_manifest('kernel.provenance'):
+            return
+        # The provenance record is not signed itself; it is bound to the signed
+        # manifest through the SHA-256 of the kernel image package it names.
+        entry = self.image_entry(provenance)
+        problems = []
+        if entry is None:
+            problems.append('signed manifest has no linux-image-%s package' % provenance['kernel_release'])
+        else:
+            recorded = provenance.get('packages', {}).get(Path(entry['pool_path']).name)
+            if recorded != entry['sha256']:
+                problems.append('provenance and signed manifest disagree on the kernel image package hash')
+            if provenance.get('package_version') != entry['version']:
+                problems.append('provenance package version is not the manifest version')
+        evidence = self.cfg.path('evidence')
+        notes = []
+        try:
+            pin = json.loads(read_text(evidence / 'source-pin.json'))
+            if pin.get('archive_sha256') != provenance.get('source_archive_sha256') or \
+                    pin.get('version') != provenance.get('version'):
+                problems.append('source-pin.json does not describe the source named in the provenance')
+            status = read_text(evidence / 'signature-status.txt')
+            signer = provenance.get('signer_primary_fingerprint', 'missing')
+            if not re.search(r'^\[GNUPG:\] VALIDSIG \S+ .* %s$' % re.escape(signer), status, re.M) or \
+                    signer not in [m.get('fingerprint') for m in pin.get('maintainers', [])]:
+                problems.append('recorded upstream source signature is not from the pinned maintainer key')
+        except (OSError, ValueError, AttributeError, TypeError) as error:
+            notes.append('upstream source evidence not checked: %s' % clean(error, 80))
+        try:
+            desktop = json.loads(read_text(evidence / 'desktop-pin.json'))
+            by_file = {Path(e['pool_path']).name: e['sha256'] for e in self.manifest['packages']}
+            for item in desktop.get('packages', []):
+                if by_file.get(item.get('file')) != item.get('sha256'):
+                    problems.append('desktop-pin.json package %s is not the one in the signed manifest' % item.get('file'))
+        except (OSError, ValueError, AttributeError, TypeError) as error:
+            notes.append('desktop pin not checked: %s' % clean(error, 80))
+        if problems:
+            return self.add('kernel.provenance', FAIL, '; '.join(problems[:3]), problems=shorten(problems))
+        self.provenance = provenance
+        details = {'kernel_release': provenance['kernel_release'], 'source_version': provenance.get('version'),
+                   'source_modified': provenance.get('source_modified'), 'notes': notes,
+                   'upstream_signer': provenance.get('signer_primary_fingerprint')}
+        if notes:
+            return self.add('kernel.provenance', UNKNOWN, 'kernel package is bound to the signed manifest, but %s'
+                            % '; '.join(notes), **details)
+        self.add('kernel.provenance', PASS, 'build evidence for Linux %s is consistent with the signed manifest'
+                 % provenance['kernel_release'], **details)
+
+    def running_release(self):
+        if self.cfg.offline:
+            return None
+        try:
+            return read_text(self.cfg.path('osrelease')).strip() or None
+        except OSError:
+            return None
+
+    def is_live(self):
+        try:
+            return 'boot=casper' in read_text(self.cfg.path('cmdline')).split()
+        except OSError:
+            return None
+
+    def check_kernel_release(self):
+        provenance = getattr(self, 'provenance', None)
+        running = self.running_release()
+        self.state['kernel_release'] = running
+        self.kernel_target = provenance['kernel_release'] if provenance else None
+        if self.cfg.offline:
+            return self.add('kernel.release', UNKNOWN, 'offline check of %s: no running kernel to compare; '
+                            'checking the installed DesOS kernel files instead' % self.cfg.root)
+        if running is None:
+            return self.add('kernel.release', UNKNOWN, 'the running kernel release could not be read')
+        if provenance is None:
+            return self.add('kernel.release', UNKNOWN, 'running %s, but there is no usable provenance record to compare with' % running)
+        if running == provenance['kernel_release']:
+            self.state['kernel'] = 'desos'
+            return self.add('kernel.release', PASS, 'running the DesOS kernel %s named in the provenance record' % running,
+                            running=running, flavour='desos')
+        self.kernel_target = None
+        package = next((n for n in ('linux-image-' + running, 'linux-image-unsigned-' + running)
+                        if self.safe_installed(n)), None)
+        if package and not any(e['package'] == package for e in self.manifest['packages']):
+            self.state['kernel'] = 'ubuntu-compatibility'
+            self.compat_package = package
+            return self.add('kernel.release', UNKNOWN, 'booted the Ubuntu compatibility kernel %s (package %s); it is supplied '
+                            'and updated by Ubuntu and is outside the DesOS provenance record, which covers %s'
+                            % (running, package, provenance['kernel_release']), running=running,
+                            flavour='ubuntu-compatibility', package=package, expected=provenance['kernel_release'])
+        self.state['kernel'] = 'other'
+        self.add('kernel.release', FAIL, 'running kernel %s is neither the DesOS kernel %s nor an installed Ubuntu kernel package'
+                 % (running, provenance['kernel_release']), running=running, flavour='other')
+
+    def safe_installed(self, name):
+        try:
+            return self.installed(name)
+        except OSError:
+            return None
+
+    def recorded_md5(self, package, relative):
+        info = self.cfg.path('dpkg') / 'info'
+        for candidate in (package + '.md5sums', package + ':amd64.md5sums'):
+            if (info / candidate).is_file():
+                for line in read_text(info / candidate, limit=64 * 1024 * 1024).splitlines():
+                    digest, _, name = line.partition('  ')
+                    if name == relative:
+                        return digest
+        return None
+
+    def boot_images(self, release):
+        """Files that hold the kernel image this boot would have loaded."""
+        paths = [('/boot/vmlinuz-' + release, self.cfg.path('boot') / ('vmlinuz-' + release))]
+        if self.is_live():
+            media = self.cfg.path('live_media') / 'casper' / ('vmlinuz-' + release)
+            if media.is_file():
+                paths.append(('live medium casper/vmlinuz-' + release, media))
+        return paths
+
+    def check_kernel_image(self):
+        release = getattr(self, 'kernel_target', None)
+        compat = getattr(self, 'compat_package', None) if self.state['kernel'] == 'ubuntu-compatibility' else None
+        if release is None and compat is None:
+            return self.add('kernel.image', UNKNOWN, 'no kernel release that the DesOS evidence covers is in use')
+        if compat:
+            release = self.state['kernel_release']
+        relative = 'boot/vmlinuz-' + release
+        observed = {}
+        try:
+            for label, path in self.boot_images(release):
+                if not path.is_file():
+                    return self.add('kernel.image', FAIL, '%s is missing' % label)
+                with open(path, 'rb') as stream:
+                    data = stream.read()
+                observed[label] = (hashlib.sha256(data).hexdigest(), hashlib.md5(data).hexdigest())
+        except PermissionError:
+            return self.add('kernel.image', UNKNOWN, 'the kernel image is readable only by root; run desos-verify as root')
+        except OSError as error:
+            return self.add('kernel.image', UNKNOWN, 'the kernel image could not be read: %s' % error)
+        details = {'sha256': {k: v[0] for k, v in observed.items()}}
+        scope = 'what was loaded into memory cannot be observed from here; this is the file the boot loader is given'
+        if compat:
+            recorded = self.recorded_md5(compat, relative)
+            if recorded and any(v[1] != recorded for v in observed.values()):
+                return self.add('kernel.image', FAIL, 'Ubuntu kernel image %s differs from dpkg\'s record for %s' % (relative, compat),
+                                method='dpkg-md5', **details)
+            return self.add('kernel.image', UNKNOWN, 'Ubuntu compatibility kernel image is not covered by DesOS evidence%s'
+                            % ('; it matches dpkg\'s own (weak) MD5 record' if recorded else ''), method='dpkg-md5', **details)
+        entry = self.image_entry(self.provenance)
+        if self.full:
+            deb, reason = self.verified_deb(entry)
+            if deb is None:
+                return self.add('kernel.image', FAIL, 'cannot compare: %s' % reason, **details)
+            expected = self.walk_deb(entry, deb).get(relative)
+            if expected is None:
+                return self.add('kernel.image', FAIL, 'the signed kernel package contains no %s' % relative, **details)
+            wrong = [label for label, value in observed.items() if value[0] != expected[1]]
+            if wrong:
+                return self.add('kernel.image', FAIL, '%s differs from the image in the signed kernel package' % ', '.join(wrong),
+                                method='signed-sha256', expected_sha256=expected[1], **details)
+            return self.add('kernel.image', PASS, '%s is byte-identical to the image in the signed kernel package (%s)'
+                            % (' and '.join(observed), scope), method='signed-sha256', expected_sha256=expected[1], **details)
+        recorded = self.recorded_md5(entry['package'], relative)
+        if recorded is None:
+            return self.add('kernel.image', UNKNOWN, 'dpkg has no checksum recorded for %s; the full check compares it '
+                            'with the signed package' % relative, method='dpkg-md5', **details)
+        wrong = [label for label, value in observed.items() if value[1] != recorded]
+        if wrong:
+            return self.add('kernel.image', FAIL, '%s differs from dpkg\'s record for %s' % (', '.join(wrong), entry['package']),
+                            method='dpkg-md5', **details)
+        self.add('kernel.image', PASS, '%s matches dpkg\'s recorded MD5 (weak, unsigned record; the full check compares '
+                 'SHA-256 with the signed package)' % ' and '.join(observed), method='dpkg-md5', **details)
+
+    def check_kernel_config(self):
+        release = getattr(self, 'kernel_target', None)
+        if release is None:
+            reason = ('the Ubuntu compatibility kernel uses Ubuntu\'s configuration, which DesOS evidence does not cover'
+                      if self.state['kernel'] == 'ubuntu-compatibility' else
+                      'no kernel release that the DesOS evidence covers is in use')
+            return self.add('kernel.config', UNKNOWN, reason)
+        expected = self.provenance.get('config_sha256')
+        sources = {'/boot/config-' + release: self.cfg.path('boot') / ('config-' + release),
+                   'shipped evidence config-' + release: self.cfg.path('evidence') / ('config-' + release)}
+        digests, problems = {}, []
+        for label, path in sources.items():
+            if not path.is_file():
+                problems.append('%s is missing' % label)
+                continue
+            digests[label] = sha256_file(path)
+            if digests[label] != expected:
+                problems.append('%s differs from the provenance record' % label)
+        builtin = self.cfg.path('kconfig')
+        if not self.cfg.offline and builtin.is_file():
+            with gzip.open(builtin, 'rb') as stream:
+                digests['/proc/config.gz'] = hash_stream(stream)
+            if digests['/proc/config.gz'] != expected:
+                problems.append('the configuration built into the running kernel differs from the provenance record')
+        method = 'provenance-sha256'
+        if self.full and not problems:
+            entry = self.image_entry(self.provenance)
+            deb, reason = self.verified_deb(entry)
+            packaged = self.walk_deb(entry, deb).get('boot/config-' + release) if deb else None
+            if packaged is None or packaged[1] != expected:
+                problems.append('the configuration inside the signed kernel package is not the one in the provenance record')
+            method = 'signed-sha256'
+        if problems:
+            return self.add('kernel.config', FAIL, '; '.join(problems[:3]), expected_sha256=expected, sha256=digests)
+        seen = 'including the copy built into the running kernel' if '/proc/config.gz' in digests else \
+            'this kernel does not expose its built-in configuration, so only files on disk were compared'
+        self.add('kernel.config', PASS, 'kernel configuration matches the provenance record (%s)' % seen,
+                 method=method, expected_sha256=expected, sha256=digests)
+
+    # --- identity -----------------------------------------------------------
+
+    def check_os_release(self):
+        try:
+            path = self.cfg.path('os_release')
+            text = read_text(path)
+        except OSError as error:
+            return self.add('identity.os-release', FAIL, 'os-release is unreadable: %s' % error)
+        values = parse_os_release(text)
+        details = {k.lower(): values.get(k) for k in ('ID', 'NAME', 'PRETTY_NAME', 'VERSION', 'VERSION_ID')}
+        if values.get('ID') != 'desos':
+            return self.add('identity.os-release', FAIL, 'os-release identifies this system as %r, not DesOS'
+                            % values.get('ID'), **details)
+        entry = next((e for e in (self.manifest or {}).get('packages', []) if e['package'] == 'desos-release'), None)
+        if entry is None:
+            return self.add('identity.os-release', UNKNOWN, 'os-release says %s, but no signed desos-release package '
+                            'is available to compare it with' % values.get('PRETTY_NAME', 'DesOS'), **details)
+        if not self.full and entry.get('size_bytes', QUICK_DEB_LIMIT + 1) > QUICK_DEB_LIMIT:
+            return self.add('identity.os-release', UNKNOWN, 'os-release says DesOS; desos-release is too large to '
+                            'compare in a quick check', **details)
+        deb, reason = self.verified_deb(entry)
+        if deb is None:
+            return self.add('identity.os-release', FAIL, 'desos-release: %s' % reason, **details)
+        packaged = self.walk_deb(entry, deb).get('usr/lib/os-release')
+        actual = hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()
+        details['sha256'] = actual
+        if packaged is None or packaged[1] != sha256_file(path):
+            return self.add('identity.os-release', FAIL, 'os-release says DesOS but is not the file from the signed '
+                            'desos-release %s package' % entry['version'], **details)
+        self.add('identity.os-release', PASS, 'os-release is the %s identity from the signed desos-release %s package'
+                 % (values.get('PRETTY_NAME', 'DesOS'), entry['version']), **details)
+
+    def check_apt_sources(self):
+        try:
+            entries = parse_apt_sources(self.cfg.path('apt'))
+        except OSError as error:
+            return self.add('identity.apt-sources', UNKNOWN, 'apt sources are unreadable: %s' % error)
+        repo = '/' + self.cfg.paths['repository'].strip('/')
+        key = '/' + self.cfg.paths['key'].strip('/')
+        own, problems, unexpected = [], [], []
+
+        def describe(entry):
+            return '%s (%s %s)' % (entry['file'], ' '.join(entry['uris']), ' '.join(entry['suites']))
+        for entry in entries:
+            parsed = [urlsplit(uri) for uri in entry['uris']]
+            local = [u for u in parsed if u.scheme in ('file', 'copy') and os.path.normpath('/' + u.path.lstrip('/')) == repo]
+            if entry['insecure']:
+                problems.append('%s disables signature checking' % describe(entry))
+            if local:
+                own.append(entry)
+                if len(parsed) != 1 or entry['suites'] != ['desos'] or entry['components'] != ['main'] \
+                        or entry['signed_by'] != key:
+                    problems.append('the DesOS source in %s is not the shipped definition' % entry['file'])
+            elif entry['signed_by'] == key:
+                problems.append('%s trusts the DesOS archive key for a different location' % describe(entry))
+            elif not (parsed and all(u.scheme in ('http', 'https') and (
+                    u.hostname in UBUNTU_HOSTS or (u.hostname or '').endswith('.archive.ubuntu.com')) for u in parsed)
+                    and entry['signed_by'] == UBUNTU_KEYRING):
+                unexpected.append(describe(entry))
+        if len(own) != 1:
+            problems.append('%d enabled apt sources point at the shipped DesOS repository; exactly one is expected' % len(own))
+        details = {'sources': len(entries), 'unexpected': shorten(unexpected)}
+        if problems:
+            return self.add('identity.apt-sources', FAIL, '; '.join(problems[:3]), problems=shorten(problems), **details)
+        if unexpected:
+            return self.add('identity.apt-sources', UNKNOWN, '%d additional apt source(s) could supply packages with DesOS '
+                            'names: %s' % (len(unexpected), '; '.join(unexpected[:3])), **details)
+        self.add('identity.apt-sources', PASS, 'DesOS packages can come only from the signed shipped repository; the '
+                 'other %d source(s) are Ubuntu\'s own archives' % (len(entries) - 1), **details)
+
+    # --- state --------------------------------------------------------------
+
+    def check_secure_boot(self):
+        if self.cfg.offline:
+            return self.add('state.secure-boot', UNKNOWN, 'offline check: firmware state of the target is not observable')
+        efi = self.cfg.path('efi')
+        if not efi.is_dir():
+            self.state['secure_boot'] = 'unsupported'
+            return self.add('state.secure-boot', PASS, 'booted through legacy BIOS; Secure Boot does not apply and '
+                            'nothing verified the boot chain', value='unsupported')
+        try:
+            data = (efi / SECURE_BOOT_VAR).read_bytes()
+        except FileNotFoundError:
+            self.state['secure_boot'] = 'disabled'
+            return self.add('state.secure-boot', PASS, 'UEFI firmware exposes no SecureBoot variable; Secure Boot is '
+                            'off and nothing verified the boot chain', value='disabled')
+        except OSError as error:
+            return self.add('state.secure-boot', UNKNOWN, 'the SecureBoot firmware variable is unreadable: %s' % error)
+        enabled = len(data) >= 5 and data[4] == 1
+        self.state['secure_boot'] = 'enabled' if enabled else 'disabled'
+        if enabled:
+            return self.add('state.secure-boot', PASS, 'Secure Boot is enabled; note this preview\'s DesOS kernel is not '
+                            'signed for it, so check which key the firmware accepted', value='enabled')
+        self.add('state.secure-boot', PASS, 'Secure Boot is disabled, as this preview expects; nothing verified the '
+                 'boot chain before this tool ran', value='disabled')
+
+    def check_live(self):
+        if self.cfg.offline:
+            return self.add('state.live-session', UNKNOWN, 'offline check: the target is not running')
+        live = self.is_live()
+        if live is None:
+            return self.add('state.live-session', UNKNOWN, 'the kernel command line is unreadable')
+        self.state['session'] = 'live' if live else 'installed'
+        self.add('state.live-session', PASS, 'live session from installation media; changes are temporary' if live
+                 else 'installed system (not a live session)', value=self.state['session'])
+
+    def check_root_fs(self):
+        if self.cfg.offline:
+            return self.add('state.root-filesystem', UNKNOWN, 'offline check: the target\'s root mount is not observable')
+        try:
+            mounts = [line.split() for line in read_text(self.cfg.path('mounts')).splitlines()]
+        except OSError as error:
+            return self.add('state.root-filesystem', UNKNOWN, 'the mount table is unreadable: %s' % error)
+        roots = [m for m in mounts if len(m) >= 4 and m[1] == '/']
+        if not roots:
+            return self.add('state.root-filesystem', UNKNOWN, 'no root mount found in the mount table')
+        device, _, kind, options = roots[-1][:4]
+        self.state['root_filesystem'] = kind
+        details = {'value': kind, 'device': clean(device, 120), 'read_only': 'ro' in options.split(',')}
+        session = self.state['session']
+        if session == 'unknown':
+            return self.add('state.root-filesystem', UNKNOWN, 'root is %s, but the session type is unknown' % kind, **details)
+        if kind in EXPECTED_ROOT_FS[session]:
+            return self.add('state.root-filesystem', PASS, 'root is %s, as expected for %s' % (
+                kind, 'a live session' if session == 'live' else 'an installed system'), **details)
+        self.add('state.root-filesystem', UNKNOWN, 'root is %s; only %s is a validated configuration for %s' % (
+            kind, '/'.join(EXPECTED_ROOT_FS[session]), 'a live session' if session == 'live' else 'an installed system'),
+            **details)
+
+    # --- driver -------------------------------------------------------------
+
+    def run(self):
+        started = self.cfg.now()
+        clock = time.monotonic()
+        self.work = Path(tempfile.mkdtemp(prefix='desos-verify-', dir=self.cfg.tmpdir))
+        os.chmod(self.work, 0o700)
+        steps = [('signatures.key', self.check_key), ('signatures.manifest', self.check_manifest),
+                 ('signatures.release', self.check_release), ('repository.index', self.check_index),
+                 ('repository.pool', self.check_pool), ('packages.installed', self.check_installed),
+                 ('packages.files', self.check_files), ('kernel.provenance', self.check_provenance),
+                 ('kernel.release', self.check_kernel_release), ('kernel.image', self.check_kernel_image),
+                 ('kernel.config', self.check_kernel_config), ('identity.os-release', self.check_os_release),
+                 ('identity.apt-sources', self.check_apt_sources), ('state.secure-boot', self.check_secure_boot),
+                 ('state.live-session', self.check_live), ('state.root-filesystem', self.check_root_fs)]
+        try:
+            for identifier, function in steps:
+                if self.full or identifier not in FULL_ONLY:
+                    self.guarded(identifier, function)
+        finally:
+            shutil.rmtree(self.work, ignore_errors=True)
+        counts = {s: sum(1 for r in self.results if r['status'] == s) for s in (PASS, FAIL, UNKNOWN)}
+        overall = FAIL if counts[FAIL] else UNKNOWN if counts[UNKNOWN] else PASS
+        try:
+            boot_id = None if self.cfg.offline else read_text(self.cfg.path('boot_id')).strip()
+        except OSError:
+            boot_id = None
+        result = {'schema': SCHEMA, 'tool_version': TOOL_VERSION, 'mode': 'full' if self.full else 'quick',
+                  'overall': overall, 'counts': counts,
+                  'started': iso(started), 'finished': iso(self.cfg.now()),
+                  'duration_seconds': round(time.monotonic() - clock, 3),
+                  'root': str(self.cfg.root), 'offline': self.cfg.offline, 'boot_id': boot_id,
+                  'key_fingerprint': self.fingerprint, 'key_pinned': self.cfg.expect_fingerprint is not None,
+                  'manifest_sha256': self.manifest_sha256, 'state': self.state,
+                  'checks': self.results, 'skipped': [] if self.full else list(FULL_ONLY),
+                  'last_full': None, 'assurance': ASSURANCE}
+        result['summary'] = summarize(result)
+        return result
+
+
+def iso(timestamp):
+    return datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def summarize(result):
+    """The single line shown at login; also stored as result['summary']."""
+    counts, mode = result['counts'], result['mode']
+    total = sum(counts.values())
+    first = lambda status: next((r for r in result['checks'] if r['status'] == status), None)
+    if result['overall'] == FAIL:
+        bad = first(FAIL)
+        text = 'DesOS integrity check FAILED (%d of %d %s checks): %s: %s' % (
+            counts[FAIL], total, mode, bad['id'], bad['reason'])
+    elif result['state'].get('kernel') == 'ubuntu-compatibility':
+        text = 'DesOS consistent with its signed evidence (%d of %d %s checks passed); running the Ubuntu ' \
+               'compatibility kernel %s, which that evidence does not cover' % (
+                   counts[PASS], total, mode, result['state'].get('kernel_release'))
+    elif result['overall'] == UNKNOWN:
+        item = first(UNKNOWN)
+        text = 'DesOS partly verified (%d of %d %s checks passed, %d unknown): %s: %s' % (
+            counts[PASS], total, mode, counts[UNKNOWN], item['id'], item['reason'])
+    else:
+        text = 'DesOS consistent with its signed evidence (%d of %d %s checks passed)' % (counts[PASS], total, mode)
+    last = result.get('last_full')
+    if last and mode == 'quick':
+        text += '; last full check %s on %s' % (
+            {'pass': 'passed', 'fail': 'FAILED', 'unknown': 'was incomplete'}.get(last.get('overall'), 'unknown'),
+            str(last.get('finished', ''))[:10])
+    return clean(text, 240)
+
+
+def write_atomic(path, text):
+    """World-readable replace-in-place; readers never observe a partial file."""
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def attach_last_full(config, result):
+    """Carry the outcome of the last persisted full check into a quick result."""
+    if result['mode'] != 'quick':
+        return
+    try:
+        previous = json.loads(read_text(config.path('full_result')))
+        if previous.get('schema') != SCHEMA or previous.get('mode') != 'full':
+            return
+        result['last_full'] = {
+            'overall': previous.get('overall') if previous.get('overall') in (PASS, FAIL, UNKNOWN) else UNKNOWN,
+            'finished': clean(previous.get('finished'), 32), 'counts': previous.get('counts'),
+            'failed': [clean(c.get('id'), 64) for c in previous.get('checks', []) if c.get('status') == FAIL][:LIST_LIMIT],
+            'same_manifest': previous.get('manifest_sha256') == result['manifest_sha256']}
+        result['summary'] = summarize(result)
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+
+
+def write_results(config, result):
+    text = json.dumps(result, indent=2, sort_keys=True) + '\n'
+    if result['mode'] == 'full':
+        write_atomic(config.path('full_result'), text)
+    write_atomic(config.path('run_result'), text)
+    write_atomic(config.path('run_status'), result['summary'] + '\n')
+
+
+def verify(config, full=False):
+    result = Verifier(config, full=full).run()
+    attach_last_full(config, result)
+    return result
+
+
+def render(result):
+    lines = ['DesOS verification (%s check, %.1f s)' % (result['mode'], result['duration_seconds']),
+             'Archive key: %s%s' % (result['key_fingerprint'] or 'unavailable',
+                                    '' if result['key_pinned'] else ' (read from this system, not pinned)'), '']
+    for item in result['checks']:
+        lines.append('  [%-7s] %-22s %s' % (item['status'].upper(), item['id'], item['reason']))
+    if result['skipped']:
+        lines.append('  not run in a quick check: ' + ', '.join(result['skipped']))
+    lines += ['', result['summary'], 'Note: ' + result['assurance'] + '.']
+    return '\n'.join(lines) + '\n'
+
+
+def main(argv=None, config=None):
+    parser = argparse.ArgumentParser(prog='desos-verify', description=__doc__.split('\n\n')[0])
+    parser.add_argument('--quick', action='store_true', help='cheap checks only (suitable for every boot)')
+    parser.add_argument('--json', action='store_true', help='print the result as JSON (schema %s)' % SCHEMA)
+    parser.add_argument('--write', action='store_true',
+                        help='also store the result under /run/desos and, for a full check, /var/lib/desos')
+    parser.add_argument('--quiet', action='store_true', help='print nothing; use the exit status and stored result')
+    parser.add_argument('--strict', action='store_true', help='exit 3 when nothing failed but something is unknown')
+    parser.add_argument('--root', default='/', help='check a mounted system from trusted media instead of the running one')
+    parser.add_argument('--key', help='use this armored archive key instead of the one inside the system')
+    parser.add_argument('--expect-fingerprint', help='fail unless the archive key has this fingerprint')
+    args = parser.parse_args(argv)
+    if args.expect_fingerprint and not re.fullmatch(r'(?:[0-9A-Fa-f ]{40,79})', args.expect_fingerprint):
+        parser.error('--expect-fingerprint needs a full key fingerprint')
+    if config is None:
+        config = Config(root=args.root, key_file=args.key, expect_fingerprint=args.expect_fingerprint)
+    result = verify(config, full=not args.quick)
+    if args.write:
+        try:
+            write_results(config, result)
+        except OSError as error:
+            print('desos-verify: cannot store the result: %s' % error, file=sys.stderr)
+            return 2
+    if not args.quiet:
+        sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + '\n' if args.json else render(result))
+    if result['overall'] == FAIL:
+        return 1
+    return 3 if args.strict and result['overall'] == UNKNOWN else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

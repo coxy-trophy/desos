@@ -1,0 +1,24 @@
+[Unit]
+Description=DesOS integrity check (full, re-hashes every DesOS file)
+After=local-fs.target systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/desos-verify --write --quiet
+TimeoutStartSec=45min
+# Idle priority: never compete with the desktop for CPU or disk.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/run/desos /var/lib/desos
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+LockPersonality=yes
+UMask=0022
