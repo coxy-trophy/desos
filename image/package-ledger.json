@@ -51,6 +51,13 @@
       "version": "2.0"
     },
     {
+      "architecture": "all",
+      "package": "desos-verify",
+      "recorded": "repository build 2026-11-13",
+      "sha256": "16c43ec7d67f0df0747e0fa65bbe587b1bdfd32d60453d7c4c9bcb1ad32f0b5a",
+      "version": "2.1"
+    },
+    {
       "architecture": "amd64",
       "package": "linux-headers-6.18.62-desos",
       "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
