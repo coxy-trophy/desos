@@ -945,7 +945,9 @@ class Verifier:
         if self.cfg.offline:
             return None
         try:
-            return read_text(self.cfg.path('osrelease')).strip() or None
+            # The kernel refuses (ENOMEM) any /proc/sys read of KMALLOC_MAX_SIZE
+            # (4 MiB) or more, so this read must stay small.
+            return read_text(self.cfg.path('osrelease'), limit=4096).strip() or None
         except OSError:
             return None
 

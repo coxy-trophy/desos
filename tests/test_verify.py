@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO_ROOT = Path(__file__).parents[1]
 TOOL = REPO_ROOT / 'verify/rootfs/usr/bin/desos-verify'
@@ -906,6 +907,33 @@ class StateTests(VerifyCase):
         self.put('proc/mounts', 'rootfs / rootfs rw 0 0\n/cow / overlay rw 0 0\n')
         self.run_check(full=False)
         self.assertEqual(self.status('state.root-filesystem'), 'pass')
+
+    def test_running_release_read_stays_below_the_kernel_sysctl_limit(self):
+        # Linux returns ENOMEM for a /proc/sys read of 4 MiB or more; the
+        # 0.2 image reported the running kernel as unreadable on every boot.
+        real_open = open
+        osrelease = str(self.root / 'proc/sys/kernel/osrelease')
+
+        class SysctlFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                self.stream.close()
+            def read(self, size=-1):
+                if size < 0 or size >= 4 * 1024 * 1024:
+                    raise OSError(12, 'Cannot allocate memory')
+                return self.stream.read(size)
+
+        def kernel_like_open(path, *args, **kwargs):
+            stream = real_open(path, *args, **kwargs)
+            return SysctlFile(stream) if str(path) == osrelease else stream
+
+        with mock.patch('builtins.open', kernel_like_open):
+            self.run_check(full=False)
+        self.assertNotEqual(self.reason('kernel.release'), 'the running kernel release could not be read')
+        self.assertEqual(self.status('kernel.release'), 'pass')
 
     def test_unvalidated_root_filesystem_is_unknown_not_failed(self):
         self.put('proc/mounts', '/dev/vda2 / xfs rw 0 0\n')
