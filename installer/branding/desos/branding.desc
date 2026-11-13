@@ -6,9 +6,10 @@ welcomeStyleCalamares: false
 # The welcome picture is a 2x PNG; let Calamares fit it to the page instead of
 # showing it at its natural 1440 pixels.
 welcomeExpandingLogo: true
-# Full screen: several pages are wider and taller than the DEs-UI workspace
-# frame at 1280x800 (seen in the v4 image), and the installer is the only task.
-windowExpanding: fullscreen
+# The partitions and summary pages are wider and taller than the DEs-UI
+# workspace at 1280x800 (v4 image). "fullscreen" was tried and is ignored by
+# des-comp 0.1.1; the fix belongs in the compositor.
+windowExpanding: normal
 windowSize: 960px,640px
 windowPlacement: center
 # The step rail is calamares-sidebar.qml. If it fails to load the rail is
