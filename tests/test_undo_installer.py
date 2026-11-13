@@ -76,7 +76,9 @@ class MountTests(unittest.TestCase):
         # The packaged fstab module writes "subvol=<subvolume>,<options>" per
         # entry; findmnt then reports FSROOT=<subvolume>, which probe() checks.
         options = calamares_mount_options('btrfs', self.mount['mountOptions'])
-        self.assertEqual(options, 'defaults,noatime,compress=zstd:1')
+        self.assertEqual(options, 'defaults,noatime')
+        # GRUB 2.14 failed to read zstd-compressed kernels on the v4 install.
+        self.assertNotIn('compress', options)
         self.assertEqual(calamares_mount_options('ext4', self.mount['mountOptions']), 'defaults')
         self.assertEqual(calamares_mount_options('efi', self.mount['mountOptions']), 'defaults,umask=0077')
         self.assertIn('tmpOptions', conf('fstab'))

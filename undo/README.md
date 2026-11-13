@@ -42,7 +42,9 @@ There is no separate `/boot` partition in the automatic layout. The EFI system
 partition (`/boot/efi`, FAT) is outside all of this.
 
 Mount options for btrfs: `noatime` (reads must not rewrite metadata shared
-with snapshots) and `compress=zstd:1`.
+with snapshots). No compression: GRUB 2.14 could not read the zstd-compressed
+kernel in the v4 image test ("premature end of file"), and `/boot` lives in
+`@` and in every snapshot, so GRUB must be able to read it.
 
 Inside `@snapshots`:
 
@@ -340,7 +342,7 @@ Most likely to be wrong first:
    `PartitionLayout::setDefaultFsType` are present in the packaged plugin; the
    behaviour is from upstream documentation, not from a run.
 4. **GRUB reading `/@snapshots/N/snapshot/boot/...` and `source`-ing a file
-   from `@snapshots`** on a zstd-compressed btrfs.
+   from `@snapshots`** (uncompressed btrfs since the v4 image test).
 5. **The greeter criterion**: that greetd's greeter shows up in
    `loginctl list-sessions` on DesOS. If not, set `[boot] require_session = no`.
 6. Renaming the mounted root subvolume from the top-level mount, and
