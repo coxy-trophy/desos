@@ -24,6 +24,9 @@ BASE = Path('/srv/desos-build')
 # Installation order. `system` is first so later components may rely on it.
 COMPONENTS = ('system', 'undo', 'verify', 'boot-theme', 'phonekey')
 MANIFEST_KEYS = {'name', 'packages', 'enable_units', 'notes'}
+# Optional: the signed DesOS package that delivers this component's rootfs/
+# tree. Such a tree is the package's source and is never copied in unsigned.
+OPTIONAL_KEYS = {'package'}
 PACKAGE = re.compile(r'[a-z0-9][a-z0-9+.-]{1,127}')
 UNIT = re.compile(r'[A-Za-z0-9:_.\\-]+(@[A-Za-z0-9:_.\\-]*)?\.(service|socket|timer|path|target|mount|automount|swap)')
 # Image state that no component may supply: account databases, privilege
@@ -40,8 +43,8 @@ FORBIDDEN_PREFIX = (
 
 
 class Component:
-    def __init__(self, name, directory, packages, units, notes):
-        self.name, self.directory = name, directory
+    def __init__(self, name, directory, packages, units, notes, package=None):
+        self.name, self.directory, self.package = name, directory, package
         self.packages, self.units, self.notes = packages, units, notes
         self.tree = directory / 'rootfs'
 
@@ -55,8 +58,13 @@ def load_manifest(directory, name):
         data = json.loads(path.read_text(encoding='utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f'Component {name}: invalid component.json: {error}') from None
-    if not isinstance(data, dict) or set(data) != MANIFEST_KEYS:
+    if not isinstance(data, dict) or set(data) - OPTIONAL_KEYS != MANIFEST_KEYS:
         raise ValueError(f'Component {name}: component.json needs exactly the keys {sorted(MANIFEST_KEYS)}')
+    package = data.get('package')
+    if package is not None and not (isinstance(package, str) and PACKAGE.fullmatch(package)):
+        raise ValueError(f'Component {name}: invalid package entry {package!r}')
+    if package is not None and package in data['packages']:
+        raise ValueError(f'Component {name}: its own package belongs in "package", not "packages"')
     if data['name'] != name:
         raise ValueError(f'Component {name}: manifest name does not match its directory')
     if not isinstance(data['notes'], str):
@@ -70,7 +78,7 @@ def load_manifest(directory, name):
         for value in values:
             if not pattern.fullmatch(value):
                 raise ValueError(f'Component {name}: invalid {key} entry {value!r}')
-    return Component(name, directory, list(data['packages']), list(data['enable_units']), data['notes'])
+    return Component(name, directory, list(data['packages']), list(data['enable_units']), data['notes'], package)
 
 
 def discover(recipes, log=None):
@@ -102,7 +110,8 @@ def union(components, attribute):
 def source_entries(component):
     """Every directory and file of a component tree; anything else refuses."""
     directories, files = [], []
-    if not component.tree.is_dir():
+    if not component.tree.is_dir() or component.package:
+        # A packaged component's files arrive inside its signed .deb.
         return directories, files
     for current, names, filenames in os.walk(component.tree, followlinks=False):
         current = Path(current)
@@ -207,12 +216,18 @@ def install(root, components, parent=BASE):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('packages', 'units', 'install'))
+    parser.add_argument('command', choices=('packages', 'units', 'packaged', 'install'))
     parser.add_argument('--recipes', type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--root', type=Path)
     args = parser.parse_args()
     components = discover(args.recipes, log=lambda message: print(message, file=sys.stderr))
-    if args.command in ('packages', 'units'):
+    if args.command == 'packaged':
+        # DesOS packages that carry a component; they come from the signed
+        # repository, not from the Ubuntu archive like `packages`.
+        for component in components:
+            if component.package:
+                print(component.package)
+    elif args.command in ('packages', 'units'):
         # One name per line; no output at all when there is nothing to add.
         for value in union(components, args.command):
             print(value)

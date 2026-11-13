@@ -491,10 +491,11 @@ fresh image's PAM stack is byte-for-byte stock.
 
 Each `sudo`:
 
-1. PAM runs the helper as root with `PAM_USER`, `PAM_SERVICE`, `PAM_TYPE`. If
-   the user has no root record, or not for this service, it exits at once,
-   silently. Otherwise it checks the record's ownership and permissions, the
-   lockout and rate state.
+1. PAM runs the helper as root with `PAM_USER`, `PAM_SERVICE`, `PAM_TYPE`
+   (and `PAM_RHOST`, `PAM_TTY`). If the user has no root record, or not for
+   this service, it exits at once, silently. Otherwise it checks the record's
+   ownership and permissions, then **where the request comes from** (below),
+   then the lockout and rate state.
 2. It works out the **action text itself**: the command line of the sudo process
    that called PAM (`/proc/<parent>/cmdline`, shell-quoted, unsafe characters
    replaced, long commands cut with a hash of the whole). Nothing the user's
@@ -508,6 +509,39 @@ Each `sudo`:
    record, checks the expiry, and verifies the signature with
    `openssl dgst -sha256 -verify` against the root-owned key. Only then exit 0.
    Nothing else in the daemon's reply is read.
+
+**Local sessions only.** The helper asks the phone only when it has positive
+evidence that the request was made in a local login session; otherwise it
+prints "Phone approval is only offered in a local session; use your
+password.", logs `skipped` with reason `remote_session` or `locality_unknown`
+(with `PAM_TTY` and `PAM_RHOST`), counts nothing against the phone and exits
+1, so the password prompt follows. The rule, in order:
+
+1. `PAM_RHOST` must be empty, a loopback name, or this machine's own host name
+   (which is what sudo's `pam_rhost` option reports). Anything else is remote.
+2. The session is read from the helper's **own control group**
+   (`/proc/self/cgroup`): pam_exec forks the helper from the process that
+   called PAM, so it sits in that process's `session-N.scope`. The user cannot
+   move a process into another session's scope, and the caller's environment
+   (`XDG_SESSION_ID`, `SSH_CONNECTION`) is never consulted. No session scope, or
+   more than one, means "cannot tell".
+3. `loginctl show-session N` must answer `Remote=no`, a non-empty `Seat`, and
+   `Class=user`, and the session's service must not be `sshd`. `Remote=yes` or
+   an sshd session is `remote_session`; no answer, no seat (serial console,
+   `machinectl shell`), or another class is `locality_unknown`.
+
+`PAM_TTY` is recorded in the audit trail but decides nothing: a terminal
+emulator on the desktop and an ssh login are both `/dev/pts/N`.
+
+Consequences that follow from failing closed: a `sudo` started outside any
+login session scope is declined, which includes `systemd-run --user --scope
+sudo ...` (otherwise an escape from an ssh session) and anything launched as a
+systemd user service; and where the polkit agent helper runs as a system
+service or under the user manager, polkit requests are always declined.
+What it cannot see: someone attached over ssh to a terminal multiplexer that
+was started in the local session is typing into local-session processes and is
+treated as local, and code already running as the user can make a local shell
+run sudo (T8; the phone still shows the true command).
 
 **polkit.** PAM is not told which polkit action is being authorised, so for the
 `polkit-1` service the helper cannot show or sign the action; the text is
@@ -541,6 +575,7 @@ the user, **for approve**; the user's `des-connectd`, for approve.
 | T11 | **Man in the middle at pairing time** | Pairing is protected by KDE Connect's 32-bit comparison code. Someone who won that could enrol their own key later. The fingerprint shown on both the phone and the desktop at enrolment, and again by `desos-phonekey enable`, is the check. | Only as good as the person comparing. |
 | T12 | **Mistake in the PAM edit** | One `sufficient` line that cannot deny; refused unless reversible; atomic write; backup; `disable` restores; nothing shipped enabled. | Not tested on a real PAM stack. Keep a root shell open when enabling. |
 | T13 | **Password exposure** | No code path reads, forwards or stores a password. | - |
+| T14 | **Approval of a remote user's sudo** (ssh, while the owner's desktop is unlocked) | The helper declines unless the request is in a local session on a seat (6.3, "Local sessions only"); the phone is not asked and the password is required. | A remote user attached to a multiplexer started locally, or acting through code planted in the local session, looks local. logind's session record and the cgroup layout are trusted. |
 
 ## 8. What is verified, and what is not
 
@@ -557,12 +592,15 @@ Proved by tests on the build host (no phone, no PAM, no root):
   unpair; walk-away locks once and returning presence unlocks nothing; a phone
   without the capability is never sent a packet); 1 cross-implementation vector
   test.
-* `desos`: `python3 -m unittest tests.test_phonekey` - 35 tests: the component
+* `desos`: `python3 -m unittest tests.test_phonekey` - 42 tests: the component
   convention, that nothing PAM reads is shipped, PAM edit round-trips
   byte-for-byte, enable/disable against a temporary root, and the helper's
   decision against a stand-in phone signing with OpenSSL (every failure mode
   falls back; inert when not enabled; record ownership; cooldown, lockout, rate
-  limit; action text).
+  limit; action text), and the locality rule against stand-in `/proc` and
+  logind answers (ssh session, `PAM_RHOST`, no session scope, user-manager
+  scope, two scopes, logind silent or failing, no seat, wrong class; the
+  caller's environment is ignored).
 
 Not verified:
 
@@ -573,6 +611,12 @@ Not verified:
   (also under sudo-rs), where `polkit-1`'s PAM file lives, and how the DEs-UI
   polkit dialog behaves while the helper waits up to 20 s before the password
   prompt appears.
+* The locality rule on a real system: that the helper really is in the
+  caller's `session-N.scope` under sudo and sudo-rs, what `loginctl` reports
+  for greetd/DEs-UI sessions (`Seat`, `Class`, `Remote`), that DEs-UI's
+  terminal and launched applications stay in the session scope rather than
+  the user manager's (if they do not, phone approval never triggers on the
+  desktop), and where polkit's helper runs. No ssh login was made.
 * The helper's privilege drop (`as_user` fork path) and syslog output: the tests
   run unprivileged, so that branch is not executed.
 * The walk-away lock against the real shell (only against a stand-in socket),
@@ -597,9 +641,12 @@ Not verified:
 5. **Key attestation**: require and verify the Android attestation chain at
    enrolment (needs Google's roots and a revocation story on the desktop), or
    stay with trust in the paired app?
-6. **Remote shells**: a sudo typed over ssh is approved on the phone as long as
-   the desktop session is unlocked, and the prompt does not say it came from
-   ssh. Refuse phone approval for non-local sessions?
+6. **Remote shells** — *decided: refused.* Phone approval is declined for a
+   request from a remote session and whenever locality cannot be established;
+   the password is asked instead (6.3, "Local sessions only"; T14). Left for a
+   human only if wanted: whether an inactive local session (switched-away VT)
+   or a session owned by another user than the one authenticating should also
+   be declined; both are currently allowed.
 7. **Root record after unpairing**: should the root helper also refuse when the
    user's store no longer lists the device (cheap, but trusts user-writable
    data to revoke), or should unpairing prompt for `desos-phonekey disable`?

@@ -6,6 +6,10 @@ chain starts at the archive key shipped in the image, so a pass means "this
 system is consistent with what that key signed", not "this system is
 untampered": see /usr/share/doc or verify/README.md for the threat model.
 
+The quick check (every boot) reads the signed per-file lists and the signed
+build evidence that images since 0.2 carry; on an image without them those
+comparisons are reported as unknown or fall back to weaker ones, never failed.
+
 Python 3 standard library only; shells out to gpgv and dpkg-deb.
 """
 import argparse
@@ -30,9 +34,15 @@ import time
 from urllib.parse import urlsplit
 
 SCHEMA = 'desos-verify-v1'
-TOOL_VERSION = 1
+TOOL_VERSION = 2
 PASS, FAIL, UNKNOWN = 'pass', 'fail', 'unknown'
 FULL_ONLY = ('repository.pool', 'packages.files')
+# The full check re-hashes every packaged file, which includes these.
+QUICK_ONLY = ('packages.key-files',)
+# What the every-boot check re-hashes from the signed per-file lists: programs,
+# units and DesOS helpers. The kernel image and config are separate checks.
+KEY_FILE_PATTERNS = ('usr/bin/*', 'usr/sbin/*', 'usr/lib/systemd/system/*', 'usr/lib/desos/*')
+QUICK_FILE_BUDGET = 256 * 1024 * 1024
 QUICK_DEB_LIMIT = 8 * 1024 * 1024
 LIST_LIMIT = 20
 ASSURANCE = ('self-reported by software on the system being checked; without measured '
@@ -317,6 +327,8 @@ class Verifier:
         self.status_db = None
         self.deb_state = {}           # package -> (ok, reason)
         self.payload = {}             # package -> {relative path: (kind, value, mode)}
+        self.lists = {}               # package -> (signed {relative path: sha256} or None, problem or None)
+        self.evidence_signed = False  # the build evidence verified against a signed SHA256SUMS
         self.state = {'kernel': 'unknown', 'kernel_release': None, 'secure_boot': 'unknown',
                       'root_filesystem': None, 'session': 'unknown'}
 
@@ -403,6 +415,16 @@ class Verifier:
                         and re.fullmatch(r'pool/[A-Za-z0-9+._~/-]+\.deb', entry['pool_path'])
                         and '..' not in entry['pool_path'] and isinstance(entry['version'], str)):
                     raise ValueError('unsafe package entry')
+                listing = entry.get('file_list')
+                if listing is not None and not (
+                        isinstance(listing, dict) and isinstance(listing.get('path'), str)
+                        and re.fullmatch(r'file-lists/[A-Za-z0-9+._~-]+\.sha256', listing['path'])
+                        and '..' not in listing['path'] and isinstance(listing.get('sha256'), str)
+                        and re.fullmatch(r'[0-9a-f]{64}', listing['sha256'])):
+                    raise ValueError('unsafe per-file list entry')
+            evidence = data.get('build_evidence')
+            if evidence is not None and not (isinstance(evidence, dict) and isinstance(evidence.get('sha256sums_sha256'), str)):
+                raise ValueError('unsafe build evidence entry')
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             return self.add('signatures.manifest', FAIL, 'signed manifest.json is not in the expected format: %s' % error)
         if data.get('schema') != 'desos-component-repository-v1':
@@ -436,6 +458,77 @@ class Verifier:
         self.release_ok = True
         self.add('signatures.release', PASS, 'Release.gpg and InRelease are signed by the shipped key and agree',
                  signer=self.fingerprint)
+
+    def check_evidence(self):
+        """SHA256SUMS over the build evidence directory, signed when the repository was."""
+        evidence = self.cfg.path('evidence')
+        sums, signature = evidence / 'SHA256SUMS', evidence / 'SHA256SUMS.asc'
+        declared = (self.manifest or {}).get('build_evidence')
+        if self.keyring is None:
+            return self.add('signatures.evidence', UNKNOWN, 'no usable archive key to verify with')
+        if not sums.is_file() or not signature.is_file():
+            if declared:
+                return self.add('signatures.evidence', FAIL, 'the signed manifest says this image ships signed build '
+                                'evidence, but SHA256SUMS or its signature is missing from %s' % evidence)
+            return self.add('signatures.evidence', UNKNOWN, 'this image carries no signed SHA256SUMS over its build '
+                            'evidence (images before 0.2 did not); the evidence is tied to the signed manifest only '
+                            'through the kernel package hash')
+        signer, reason = self.gpgv(signature, sums)
+        if signer is None:
+            return self.add('signatures.evidence', UNKNOWN if 'not installed' in reason else FAIL, 'SHA256SUMS: ' + reason)
+        if signer != self.fingerprint:
+            return self.add('signatures.evidence', FAIL, 'SHA256SUMS was signed by %s, not the shipped key' % signer)
+        digest = sha256_file(sums)
+        if declared and declared.get('sha256sums_sha256') != digest:
+            return self.add('signatures.evidence', FAIL, 'SHA256SUMS is validly signed but is not the one the signed '
+                            'manifest names; it belongs to another build', sha256sums_sha256=digest)
+        listed, problems = {}, []
+        for line in read_text(sums).splitlines():
+            match = re.fullmatch(r'([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*)', line)
+            if not match:
+                return self.add('signatures.evidence', FAIL, 'signed SHA256SUMS holds a line that is not "hash  name"')
+            listed[match.group(2)] = match.group(1)
+        for name, expected in sorted(listed.items()):
+            path = evidence / name
+            if path.is_symlink() or not path.is_file():
+                problems.append('%s is missing' % name)
+            elif sha256_file(path) != expected:
+                problems.append('%s differs from the signed SHA256SUMS' % name)
+        present = sorted(p.name for p in evidence.iterdir() if p.name not in ('SHA256SUMS', 'SHA256SUMS.asc'))
+        problems += ['%s is not covered by the signed SHA256SUMS' % name for name in present if name not in listed]
+        details = {'files': len(listed), 'sha256sums_sha256': digest, 'named_in_manifest': bool(declared), 'signer': signer}
+        if problems:
+            return self.add('signatures.evidence', FAIL, '%d build evidence problem(s): %s'
+                            % (len(problems), '; '.join(problems[:3])), problems=shorten(problems), **details)
+        self.evidence_signed = True
+        self.add('signatures.evidence', PASS, 'all %d build evidence files match the SHA256SUMS signed by the shipped key%s'
+                 % (len(listed), '' if declared else ' (the manifest of this image does not name it)'), **details)
+
+    def signed_list(self, entry):
+        """The signed per-file list of a manifest package.
+
+        ({relative path: sha256}, None) when the manifest names one and the file
+        matches it; (None, reason) when it names one that is missing or altered;
+        (None, None) when this image's manifest carries no lists at all."""
+        name = entry['package']
+        if name not in self.lists:
+            listing = entry.get('file_list')
+            if listing is None:
+                self.lists[name] = (None, None)
+            else:
+                path = self.cfg.inroot(self.cfg.paths['repository'] + '/' + listing['path'])
+                if not path.is_file():
+                    self.lists[name] = (None, 'the signed per-file list of %s is missing' % name)
+                elif sha256_file(path) != listing['sha256']:
+                    self.lists[name] = (None, 'the per-file list of %s differs from the signed manifest' % name)
+                else:
+                    files = {}
+                    for line in read_text(path, limit=64 * 1024 * 1024).splitlines():
+                        digest, separator, relative = line.partition('  ')
+                        if separator and re.fullmatch(r'[0-9a-f]{64}', digest) and relative:
+                            files[relative] = digest
+                    self.lists[name] = (files, None)
+        return self.lists[name]
 
     # --- repository ---------------------------------------------------------
 
@@ -552,6 +645,79 @@ class Verifier:
                                                          ', '.join(removed[:3])), versions=versions, removed=removed)
         self.add('packages.installed', PASS, 'all %d DesOS packages are installed at their manifest versions'
                  % len(versions), versions=versions)
+
+    def check_key_files(self):
+        """Quick check: programs and units of the DesOS packages against the signed per-file lists."""
+        if not self.need_manifest('packages.key-files'):
+            return
+        diversions = self.diversions()
+        problems, unknown, without, differs = [], [], [], []
+        checked = hashed = over_budget = 0
+        for entry in self.manifest['packages']:
+            name = entry['package']
+            files, problem = self.signed_list(entry)
+            if problem:
+                problems.append(problem)
+                continue
+            if files is None:
+                without.append(name)
+                continue
+            stanza = self.installed(name, entry.get('architecture'))
+            if stanza is None:
+                continue                      # packages.installed says whether that matters
+            if stanza.get('version') != entry['version']:
+                differs.append(name)          # reported by packages.installed; this list is for another version
+                continue
+            for relative, expected in sorted(files.items()):
+                if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in KEY_FILE_PATTERNS):
+                    continue
+                absolute = '/' + relative
+                target = absolute
+                if absolute in diversions and diversions[absolute][1] != name:
+                    target = diversions[absolute][0]
+                try:
+                    path = self.cfg.inroot(target, follow=False)
+                    info = os.lstat(path)
+                    if not stat.S_ISREG(info.st_mode):
+                        problems.append('%s: %s is no longer a regular file' % (name, absolute))
+                        continue
+                    if hashed + info.st_size > QUICK_FILE_BUDGET:
+                        over_budget += 1
+                        continue
+                    actual = sha256_file(path)
+                except FileNotFoundError:
+                    problems.append('%s: missing %s' % (name, absolute))
+                    continue
+                except OSError as error:
+                    unknown.append('%s: unreadable %s (%s)' % (name, absolute, error.strerror))
+                    continue
+                checked += 1
+                hashed += info.st_size
+                if actual != expected:
+                    problems.append('%s: modified %s' % (name, absolute))
+        details = {'method': 'SHA-256 of each installed key file against the signed per-file list of its package',
+                   'files': checked, 'bytes_hashed': hashed, 'patterns': list(KEY_FILE_PATTERNS),
+                   'packages_without_list': without, 'other_version_installed': differs,
+                   'not_hashed_over_budget': over_budget}
+        if problems:
+            return self.add('packages.key-files', FAIL, '%d key file problem(s): %s'
+                            % (len(problems), '; '.join(problems[:3])), problems=shorten(problems), **details)
+        if unknown:
+            return self.add('packages.key-files', UNKNOWN, '%d key file(s) could not be read: %s'
+                            % (len(unknown), '; '.join(unknown[:3])), problems=shorten(unknown), **details)
+        if without:
+            return self.add('packages.key-files', UNKNOWN, 'the signed manifest of this image carries no per-file list for '
+                            '%d package(s) (images before 0.2 had none); their files are compared only by the full check'
+                            % len(without), **details)
+        if over_budget:
+            return self.add('packages.key-files', UNKNOWN, '%d key files match, but %d more were not hashed within the '
+                            'quick check\'s %d MiB limit; the full check covers them'
+                            % (checked, over_budget, QUICK_FILE_BUDGET >> 20), **details)
+        if not checked:
+            return self.add('packages.key-files', UNKNOWN, 'no installed DesOS package at its manifest version has '
+                            'programs or units to compare', **details)
+        self.add('packages.key-files', PASS, '%d programs and units of the DesOS packages match their signed per-file '
+                 'lists (mode bits and other files: full check)' % checked, **details)
 
     def walk_deb(self, entry, deb):
         """Stream the .deb payload once: {relative path: (kind, value, mode, size)}."""
@@ -677,6 +843,11 @@ class Verifier:
                 unknown.append('%s: %s' % (name, error))
                 per_package[name] = {'error': clean(error)}
                 continue
+            listed, problem = self.signed_list(entry)
+            if problem:
+                failed.append('%s: %s' % (name, problem))
+            elif listed is not None and listed != {r: m[1] for r, m in members.items() if m[0] == 'file'}:
+                failed.append('%s: the signed per-file list does not describe the signed package' % name)
             self.compare_installed(entry, members, diversions, excluded, report)
             for key in ('modified', 'missing', 'mode_changed'):
                 failed += ['%s: %s %s' % (name, key.replace('_', ' '), item) for item in report[key]]
@@ -721,8 +892,9 @@ class Verifier:
             return self.add('kernel.provenance', FAIL, 'kernel-provenance.json is unusable: %s' % error)
         if not self.need_manifest('kernel.provenance'):
             return
-        # The provenance record is not signed itself; it is bound to the signed
-        # manifest through the SHA-256 of the kernel image package it names.
+        # signatures.evidence says whether the record itself is covered by a
+        # signature. Either way it must name the kernel image package by the
+        # SHA-256 the signed manifest gives.
         entry = self.image_entry(provenance)
         problems = []
         if entry is None:
@@ -760,12 +932,14 @@ class Verifier:
         self.provenance = provenance
         details = {'kernel_release': provenance['kernel_release'], 'source_version': provenance.get('version'),
                    'source_modified': provenance.get('source_modified'), 'notes': notes,
+                   'evidence_signed': self.evidence_signed,
                    'upstream_signer': provenance.get('signer_primary_fingerprint')}
         if notes:
             return self.add('kernel.provenance', UNKNOWN, 'kernel package is bound to the signed manifest, but %s'
                             % '; '.join(notes), **details)
-        self.add('kernel.provenance', PASS, 'build evidence for Linux %s is consistent with the signed manifest'
-                 % provenance['kernel_release'], **details)
+        self.add('kernel.provenance', PASS, '%s for Linux %s is consistent with the signed manifest' % (
+            'signed build evidence' if self.evidence_signed else 'build evidence (itself unsigned)',
+            provenance['kernel_release']), **details)
 
     def running_release(self):
         if self.cfg.offline:
@@ -800,6 +974,12 @@ class Verifier:
         self.kernel_target = None
         package = next((n for n in ('linux-image-' + running, 'linux-image-unsigned-' + running)
                         if self.safe_installed(n)), None)
+        if package and running.endswith('-desos') and not any(e['package'] == package for e in self.manifest['packages']):
+            self.state['kernel'] = 'other'
+            return self.add('kernel.release', UNKNOWN, 'running the DesOS kernel %s (package %s), which was installed '
+                            'after this image was built; the image\'s signed evidence covers %s only, and apt, not this '
+                            'tool, checked the newer package' % (running, package, provenance['kernel_release']),
+                            running=running, flavour='desos-update', package=package, expected=provenance['kernel_release'])
         if package and not any(e['package'] == package for e in self.manifest['packages']):
             self.state['kernel'] = 'ubuntu-compatibility'
             self.compat_package = package
@@ -866,6 +1046,22 @@ class Verifier:
             return self.add('kernel.image', UNKNOWN, 'Ubuntu compatibility kernel image is not covered by DesOS evidence%s'
                             % ('; it matches dpkg\'s own (weak) MD5 record' if recorded else ''), method='dpkg-md5', **details)
         entry = self.image_entry(self.provenance)
+        listed, problem = (None, None) if self.full else self.signed_list(entry)
+        if problem:
+            return self.add('kernel.image', FAIL, 'cannot compare: %s' % problem, **details)
+        if listed is not None:
+            expected = listed.get(relative)
+            if expected is None:
+                return self.add('kernel.image', FAIL, 'the signed per-file list of %s contains no %s'
+                                % (entry['package'], relative), **details)
+            wrong = [label for label, value in observed.items() if value[0] != expected]
+            if wrong:
+                return self.add('kernel.image', FAIL, '%s differs from the image in the signed per-file list of %s'
+                                % (', '.join(wrong), entry['package']), method='signed-sha256', evidence='file-list',
+                                expected_sha256=expected, **details)
+            return self.add('kernel.image', PASS, '%s matches the SHA-256 in the signed per-file list of %s (%s)'
+                            % (' and '.join(observed), entry['package'], scope), method='signed-sha256',
+                            evidence='file-list', expected_sha256=expected, **details)
         if self.full:
             deb, reason = self.verified_deb(entry)
             if deb is None:
@@ -876,9 +1072,10 @@ class Verifier:
             wrong = [label for label, value in observed.items() if value[0] != expected[1]]
             if wrong:
                 return self.add('kernel.image', FAIL, '%s differs from the image in the signed kernel package' % ', '.join(wrong),
-                                method='signed-sha256', expected_sha256=expected[1], **details)
+                                method='signed-sha256', evidence='package', expected_sha256=expected[1], **details)
             return self.add('kernel.image', PASS, '%s is byte-identical to the image in the signed kernel package (%s)'
-                            % (' and '.join(observed), scope), method='signed-sha256', expected_sha256=expected[1], **details)
+                            % (' and '.join(observed), scope), method='signed-sha256', evidence='package',
+                            expected_sha256=expected[1], **details)
         recorded = self.recorded_md5(entry['package'], relative)
         if recorded is None:
             return self.add('kernel.image', UNKNOWN, 'dpkg has no checksum recorded for %s; the full check compares it '
@@ -915,19 +1112,29 @@ class Verifier:
             if digests['/proc/config.gz'] != expected:
                 problems.append('the configuration built into the running kernel differs from the provenance record')
         method = 'provenance-sha256'
+        evidence = 'signed-provenance' if self.evidence_signed else 'unsigned-provenance'
+        entry = self.image_entry(self.provenance)
         if self.full and not problems:
-            entry = self.image_entry(self.provenance)
             deb, reason = self.verified_deb(entry)
             packaged = self.walk_deb(entry, deb).get('boot/config-' + release) if deb else None
             if packaged is None or packaged[1] != expected:
                 problems.append('the configuration inside the signed kernel package is not the one in the provenance record')
-            method = 'signed-sha256'
+            method, evidence = 'signed-sha256', 'package'
+        elif not problems:
+            listed, problem = self.signed_list(entry)
+            if problem:
+                problems.append(problem)
+            elif listed is not None:
+                if listed.get('boot/config-' + release) != expected:
+                    problems.append('the configuration in the signed per-file list of the kernel package is not the '
+                                    'one in the provenance record')
+                method, evidence = 'signed-sha256', 'file-list'
         if problems:
             return self.add('kernel.config', FAIL, '; '.join(problems[:3]), expected_sha256=expected, sha256=digests)
         seen = 'including the copy built into the running kernel' if '/proc/config.gz' in digests else \
             'this kernel does not expose its built-in configuration, so only files on disk were compared'
         self.add('kernel.config', PASS, 'kernel configuration matches the provenance record (%s)' % seen,
-                 method=method, expected_sha256=expected, sha256=digests)
+                 method=method, evidence=evidence, expected_sha256=expected, sha256=digests)
 
     # --- identity -----------------------------------------------------------
 
@@ -946,13 +1153,19 @@ class Verifier:
         if entry is None:
             return self.add('identity.os-release', UNKNOWN, 'os-release says %s, but no signed desos-release package '
                             'is available to compare it with' % values.get('PRETTY_NAME', 'DesOS'), **details)
-        if not self.full and entry.get('size_bytes', QUICK_DEB_LIMIT + 1) > QUICK_DEB_LIMIT:
+        listed, problem = (None, None) if self.full else self.signed_list(entry)
+        if problem:
+            return self.add('identity.os-release', FAIL, problem, **details)
+        if listed is not None:
+            packaged = ('file', listed['usr/lib/os-release']) if 'usr/lib/os-release' in listed else None
+        elif not self.full and entry.get('size_bytes', QUICK_DEB_LIMIT + 1) > QUICK_DEB_LIMIT:
             return self.add('identity.os-release', UNKNOWN, 'os-release says DesOS; desos-release is too large to '
                             'compare in a quick check', **details)
-        deb, reason = self.verified_deb(entry)
-        if deb is None:
-            return self.add('identity.os-release', FAIL, 'desos-release: %s' % reason, **details)
-        packaged = self.walk_deb(entry, deb).get('usr/lib/os-release')
+        else:
+            deb, reason = self.verified_deb(entry)
+            if deb is None:
+                return self.add('identity.os-release', FAIL, 'desos-release: %s' % reason, **details)
+            packaged = self.walk_deb(entry, deb).get('usr/lib/os-release')
         actual = hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()
         details['sha256'] = actual
         if packaged is None or packaged[1] != sha256_file(path):
@@ -1066,8 +1279,10 @@ class Verifier:
         self.work = Path(tempfile.mkdtemp(prefix='desos-verify-', dir=self.cfg.tmpdir))
         os.chmod(self.work, 0o700)
         steps = [('signatures.key', self.check_key), ('signatures.manifest', self.check_manifest),
-                 ('signatures.release', self.check_release), ('repository.index', self.check_index),
+                 ('signatures.release', self.check_release), ('signatures.evidence', self.check_evidence),
+                 ('repository.index', self.check_index),
                  ('repository.pool', self.check_pool), ('packages.installed', self.check_installed),
+                 ('packages.key-files', self.check_key_files),
                  ('packages.files', self.check_files), ('kernel.provenance', self.check_provenance),
                  ('kernel.release', self.check_kernel_release), ('kernel.image', self.check_kernel_image),
                  ('kernel.config', self.check_kernel_config), ('identity.os-release', self.check_os_release),
@@ -1075,7 +1290,7 @@ class Verifier:
                  ('state.live-session', self.check_live), ('state.root-filesystem', self.check_root_fs)]
         try:
             for identifier, function in steps:
-                if self.full or identifier not in FULL_ONLY:
+                if identifier not in (QUICK_ONLY if self.full else FULL_ONLY):
                     self.guarded(identifier, function)
         finally:
             shutil.rmtree(self.work, ignore_errors=True)
@@ -1092,7 +1307,7 @@ class Verifier:
                   'root': str(self.cfg.root), 'offline': self.cfg.offline, 'boot_id': boot_id,
                   'key_fingerprint': self.fingerprint, 'key_pinned': self.cfg.expect_fingerprint is not None,
                   'manifest_sha256': self.manifest_sha256, 'state': self.state,
-                  'checks': self.results, 'skipped': [] if self.full else list(FULL_ONLY),
+                  'checks': self.results, 'skipped': list(QUICK_ONLY if self.full else FULL_ONLY),
                   'last_full': None, 'assurance': ASSURANCE}
         result['summary'] = summarize(result)
         return result
@@ -1187,7 +1402,7 @@ def render(result):
     for item in result['checks']:
         lines.append('  [%-7s] %-22s %s' % (item['status'].upper(), item['id'], item['reason']))
     if result['skipped']:
-        lines.append('  not run in a quick check: ' + ', '.join(result['skipped']))
+        lines.append('  not run in a %s check: %s' % (result['mode'], ', '.join(result['skipped'])))
     lines += ['', result['summary'], 'Note: ' + result['assurance'] + '.']
     return '\n'.join(lines) + '\n'
 

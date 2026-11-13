@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Lets the desktop ask for "pkexec /usr/sbin/desos-undo ..." with a sentence that
+  says what is being authorised, instead of pkexec's generic one.
+
+  pkexec matches an action by program path only, so this action covers every
+  desos-undo command started through pkexec, including "run - - CMD". It must
+  therefore never be weaker than pkexec's own default: an administrator's
+  password, every time, for every kind of session. No auth_admin_keep, no "yes".
+-->
+<policyconfig>
+  <vendor>DesOS</vendor>
+  <action id="org.desos.undo.manage">
+    <description>Change DesOS system snapshots</description>
+    <message>Authentication is needed to take a system snapshot or to go back to an earlier system state (desos-undo)</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/sbin/desos-undo</annotate>
+  </action>
+</policyconfig>

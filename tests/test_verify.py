@@ -115,8 +115,50 @@ def build_deb(work, name, version, arch, files, conffiles):
     return output
 
 
+def evidence_files(debs):
+    """The build evidence as the kernel build and image recipe would supply it."""
+    by_name = {deb.stem: deb for deb in debs}
+    image = by_name['linux-image-' + KERNEL]
+    signer = 'F' * 40
+    def pool_name(name):
+        version, arch = PACKAGES[name][0], PACKAGES[name][1]
+        return '%s_%s_%s.deb' % (name, version, arch)
+    return {
+        'kernel-provenance.json': json.dumps({
+            'kernel_release': KERNEL, 'package_version': PACKAGES['linux-image-' + KERNEL][0], 'version': '6.18.62',
+            'config_sha256': sha('CONFIG_FIXTURE=y\n'), 'source_archive_sha256': 'a' * 64, 'source_modified': False,
+            'signer_primary_fingerprint': signer,
+            'packages': {pool_name('linux-image-' + KERNEL): sha(image.read_bytes())}}),
+        'source-pin.json': json.dumps({'archive_sha256': 'a' * 64, 'version': '6.18.62',
+                                       'maintainers': [{'fingerprint': signer}]}),
+        'signature-status.txt': '[GNUPG:] GOODSIG X test\n[GNUPG:] VALIDSIG %s 2026-11-06 1 0 4 0 1 10 00 %s\n' % (signer, signer),
+        'desktop-pin.json': json.dumps({'packages': [{'file': pool_name('des-ui'), 'sha256': sha(by_name['des-ui'].read_bytes())}]}),
+        'config-' + KERNEL: 'CONFIG_FIXTURE=y\n',
+    }
+
+
+def resign(home, repository, change):
+    """Rewrite a repository's manifest and sign it again, as the key holder could."""
+    path = repository / 'manifest.json'
+    manifest = json.loads(path.read_text())
+    change(manifest)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+    (repository / 'manifest.json.asc').unlink()
+    gpg(home, '--armor', '--output', str(repository / 'manifest.json.asc'), '--detach-sign', str(path))
+
+
+def strip_new_evidence(manifest):
+    for entry in manifest['packages']:
+        del entry['file_list']
+    del manifest['build_evidence']
+    manifest['artifacts'] = {name: record for name, record in manifest['artifacts'].items()
+                             if not name.startswith(('file-lists/', 'build-evidence/'))}
+
+
 class Fixture:
-    """Built once: two keys, the debs, and a repository signed by each key."""
+    """Built once: two keys, the debs, a repository signed by each key, and the
+    first repository as an image before 0.2 had it: no per-file lists, no signed
+    build evidence."""
     ready = None
 
     @classmethod
@@ -131,12 +173,21 @@ class Fixture:
         self.homes = [work / 'gpg-a', work / 'gpg-b']
         self.fingerprints = [make_key(home) for home in self.homes]
         self.debs = [build_deb(work, name, *spec) for name, spec in PACKAGES.items()]
+        self.evidence = evidence_files(self.debs)
+        (work / 'evidence').mkdir()
+        for name, content in self.evidence.items():
+            (work / 'evidence' / name).write_text(content)
         self.repos = []
         for index, home in enumerate(self.homes):
             output = work / ('repository-%d' % index)
             component_repo.build_repository([str(d) for d in self.debs], output, home, self.fingerprints[index],
-                                            epoch=1794268800)
+                                            epoch=1794268800, evidence=sorted((work / 'evidence').iterdir()))
             self.repos.append(output)
+        self.legacy = work / 'repository-legacy'
+        shutil.copytree(self.repos[0], self.legacy)
+        shutil.rmtree(self.legacy / 'file-lists')
+        shutil.rmtree(self.legacy / 'build-evidence')
+        resign(self.homes[0], self.legacy, strip_new_evidence)
 
     def close(self):
         for home in self.homes:
@@ -160,7 +211,10 @@ class VerifyCase(unittest.TestCase):
         self.root = Path(self.tmp.name) / 'root'
         self.scratch = Path(self.tmp.name) / 'scratch'
         self.scratch.mkdir()
-        self.install(self.fixture.repos[0])
+        self.install(self.repository())
+
+    def repository(self):
+        return self.fixture.repos[0]
 
     # --- fixture system -----------------------------------------------------
 
@@ -202,20 +256,7 @@ class VerifyCase(unittest.TestCase):
         self.put('var/lib/dpkg/diversions', '/usr/lib/os-release\n/usr/lib/os-release.ubuntu\ndesos-release\n')
         (root / 'etc').mkdir(exist_ok=True)
         os.symlink('../usr/lib/os-release', root / 'etc/os-release')
-        by_name = {e['package']: e for e in manifest['packages']}
-        image = by_name['linux-image-' + KERNEL]
-        signer = 'F' * 40
-        self.put('usr/share/doc/desos/build/kernel-provenance.json', json.dumps({
-            'kernel_release': KERNEL, 'package_version': image['version'], 'version': '6.18.62',
-            'config_sha256': sha('CONFIG_FIXTURE=y\n'), 'source_archive_sha256': 'a' * 64, 'source_modified': False,
-            'signer_primary_fingerprint': signer, 'packages': {Path(image['pool_path']).name: image['sha256']}}))
-        self.put('usr/share/doc/desos/build/source-pin.json', json.dumps({
-            'archive_sha256': 'a' * 64, 'version': '6.18.62', 'maintainers': [{'fingerprint': signer}]}))
-        self.put('usr/share/doc/desos/build/signature-status.txt',
-                 '[GNUPG:] GOODSIG X test\n[GNUPG:] VALIDSIG %s 2026-11-06 1 0 4 0 1 10 00 %s\n' % (signer, signer))
-        self.put('usr/share/doc/desos/build/desktop-pin.json', json.dumps({'packages': [
-            {'file': Path(by_name['des-ui']['pool_path']).name, 'sha256': by_name['des-ui']['sha256']}]}))
-        self.put('usr/share/doc/desos/build/config-' + KERNEL, 'CONFIG_FIXTURE=y\n')
+        self.install_evidence(repository)
         self.put('etc/apt/sources.list', '')
         self.put('etc/apt/sources.list.d/ubuntu.sources', UBUNTU_SOURCES)
         self.put('etc/apt/sources.list.d/desos.sources', DESOS_SOURCES)
@@ -224,6 +265,19 @@ class VerifyCase(unittest.TestCase):
         self.put('proc/cmdline', 'BOOT_IMAGE=/boot/vmlinuz-%s root=UUID=x ro quiet\n' % KERNEL)
         self.put('proc/mounts', 'proc /proc proc rw 0 0\n/dev/vda2 / ext4 rw,relatime 0 0\n')
         self.put(SECURE_BOOT, b'\x06\x00\x00\x00\x00')
+
+    def install_evidence(self, repository):
+        """As image/finalize-rootfs.sh: the signed copies when the repository has them."""
+        signed = repository / 'build-evidence'
+        if signed.is_dir():
+            for path in signed.iterdir():
+                self.put('usr/share/doc/desos/build/' + path.name, path.read_bytes())
+        else:
+            for name, content in self.fixture.evidence.items():
+                self.put('usr/share/doc/desos/build/' + name, content)
+
+    def resign_installed(self, change):
+        resign(self.fixture.homes[0], self.root / 'usr/share/desos/repository', change)
 
     def config(self, **options):
         options.setdefault('offline', False)
@@ -246,15 +300,19 @@ class VerifyCase(unittest.TestCase):
         repository = self.fixture.repos[1]
         shutil.copytree(repository, self.root / 'usr/share/desos/repository')
         self.put('usr/share/keyrings/desos-archive-keyring.asc', (repository / 'desos-archive-keyring.asc').read_text())
+        self.install_evidence(repository)
 
 
 class PristineSystemTests(VerifyCase):
     def test_full_check_passes_every_check_and_reports_the_key_fingerprint(self):
         result = self.run_check(full=True)
         self.assertEqual({c['id']: c['status'] for c in result['checks'] if c['status'] != 'pass'}, {})
-        self.assertEqual(len(result['checks']), 16)
+        self.assertEqual(len(result['checks']), 17)
         self.assertEqual(result['overall'], 'pass')
-        self.assertEqual(result['skipped'], [])
+        self.assertEqual(result['skipped'], ['packages.key-files'])
+        self.assertEqual(result['tool_version'], 2)
+        self.assertEqual(self.by_id['kernel.image']['details']['evidence'], 'package')
+        self.assertTrue(self.by_id['kernel.provenance']['details']['evidence_signed'])
         self.assertEqual(result['key_fingerprint'], self.fixture.fingerprints[0])
         self.assertEqual(result['schema'], 'desos-verify-v1')
         self.assertEqual(result['state'], {'kernel': 'desos', 'kernel_release': KERNEL, 'secure_boot': 'disabled',
@@ -269,10 +327,21 @@ class PristineSystemTests(VerifyCase):
         result = self.run_check(full=False)
         self.assertEqual(result['overall'], 'pass')
         self.assertEqual(result['skipped'], ['repository.pool', 'packages.files'])
-        self.assertEqual(len(result['checks']), 14)
+        self.assertEqual(len(result['checks']), 16)
         self.assertNotIn('packages.files', self.by_id)
-        self.assertEqual(self.by_id['kernel.image']['details']['method'], 'dpkg-md5')
-        self.assertIn('weak', self.reason('kernel.image'))
+        # With the signed per-file lists the quick check no longer leans on dpkg's MD5.
+        for identifier in ('kernel.image', 'kernel.config'):
+            self.assertEqual(self.by_id[identifier]['details']['method'], 'signed-sha256')
+            self.assertEqual(self.by_id[identifier]['details']['evidence'], 'file-list')
+        keys = self.by_id['packages.key-files']['details']
+        self.assertEqual((keys['files'], keys['packages_without_list'], keys['not_hashed_over_budget']), (1, [], 0))
+        self.assertEqual(self.by_id['signatures.evidence']['details']['files'], 5)
+
+    def test_quick_check_runs_no_dpkg_deb(self):
+        class NoDeb(dv.Runner):
+            def stream(inner, argv):
+                raise AssertionError('quick check unpacked a package: %r' % argv)
+        self.assertEqual(self.run_check(full=False, runner=NoDeb())['overall'], 'pass')
 
     def test_every_check_has_the_documented_shape(self):
         result = self.run_check(full=True)
@@ -309,7 +378,7 @@ class SignatureTests(VerifyCase):
                 if value is not None:
                     os.environ[name] = value
         self.assertEqual(result['overall'], 'pass')
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)   # manifest, Release.gpg, InRelease, SHA256SUMS
         for argv, env in calls:
             self.assertEqual(argv[0], 'gpgv')
             homedir, keyring = Path(argv[argv.index('--homedir') + 1]), Path(argv[argv.index('--keyring') + 1])
@@ -405,7 +474,60 @@ class PackageTests(VerifyCase):
         self.assertIn('/usr/bin/des-ui', self.reason('packages.files'))
         self.assertEqual(self.by_id['packages.files']['details']['packages']['des-ui']['modified'], ['/usr/bin/des-ui'])
         self.assertEqual(result['overall'], 'fail')
-        self.assertEqual(self.run_check(full=False)['overall'], 'pass', 'documented: quick does not hash package files')
+        self.assertNotIn('packages.key-files', self.by_id)
+        # A program is among the files the quick check re-hashes from the signed list.
+        self.run_check(full=False)
+        self.assertEqual(self.status('packages.key-files'), 'fail')
+        self.assertIn('des-ui: modified /usr/bin/des-ui', self.reason('packages.key-files'))
+
+    def test_quick_check_does_not_hash_files_that_are_not_programs_or_units(self):
+        self.put('usr/share/des-ui/.hidden', 'changed\n')
+        self.assertEqual(self.run_check(full=False)['overall'], 'pass', 'documented: only the full check hashes every file')
+        self.assertEqual(self.run_check(full=True)['overall'], 'fail')
+
+    def test_missing_program_and_altered_file_list_fail_the_quick_check(self):
+        (self.root / 'usr/bin/des-ui').unlink()
+        self.run_check(full=False)
+        self.assertIn('missing /usr/bin/des-ui', self.reason('packages.key-files'))
+        self.put('usr/bin/des-ui', '#!/bin/sh\necho backdoor\n', 0o755)
+        listing = next((self.root / 'usr/share/desos/repository/file-lists').glob('des-ui_*.sha256'))
+        listing.write_text(listing.read_text().replace(sha('#!/bin/sh\necho desktop\n'), sha('#!/bin/sh\necho backdoor\n')))
+        self.run_check(full=False)
+        self.assertEqual(self.status('packages.key-files'), 'fail')
+        self.assertIn('differs from the signed manifest', self.reason('packages.key-files'))
+        self.assertEqual(self.status('repository.index'), 'fail')
+
+    def test_key_file_check_leaves_other_versions_to_the_installed_check(self):
+        status = self.root / 'var/lib/dpkg/status'
+        status.write_text(status.read_text().replace('Version: 0.1.1', 'Version: 0.1.2'))
+        self.put('usr/bin/des-ui', 'the 0.1.2 program\n', 0o755)
+        self.run_check(full=False)
+        self.assertEqual(self.status('packages.installed'), 'fail')
+        self.assertEqual(self.by_id['packages.key-files']['details']['other_version_installed'], ['des-ui'])
+        self.assertNotEqual(self.status('packages.key-files'), 'fail')
+
+    def test_key_files_beyond_the_quick_budget_are_unknown_not_passed(self):
+        old, dv.QUICK_FILE_BUDGET = dv.QUICK_FILE_BUDGET, 4
+        self.addCleanup(setattr, dv, 'QUICK_FILE_BUDGET', old)
+        self.run_check(full=False)
+        self.assertEqual(self.status('packages.key-files'), 'unknown')
+        self.assertEqual(self.by_id['packages.key-files']['details']['not_hashed_over_budget'], 1)
+
+    def test_full_check_fails_a_signed_file_list_that_does_not_describe_its_package(self):
+        """Both are signed, so this is a builder defect rather than tampering; it must not pass."""
+        repository = self.root / 'usr/share/desos/repository'
+        listing = next((repository / 'file-lists').glob('des-ui_*.sha256'))
+        listing.write_text(listing.read_text().replace(sha('dot file\n'), 'c' * 64))
+
+        def change(manifest):
+            relative = listing.relative_to(repository).as_posix()
+            entry = next(e for e in manifest['packages'] if e['package'] == 'des-ui')
+            entry['file_list']['sha256'] = manifest['artifacts'][relative]['sha256'] = sha(listing.read_bytes())
+        self.resign_installed(change)
+        self.run_check(full=True)
+        self.assertEqual(self.status('repository.index'), 'pass')
+        self.assertEqual(self.status('packages.files'), 'fail')
+        self.assertIn('does not describe the signed package', self.reason('packages.files'))
 
     def test_same_size_change_is_caught_by_content_hash(self):
         self.put('usr/share/des-ui/.hidden', 'dot fild\n')
@@ -539,9 +661,22 @@ class KernelTests(VerifyCase):
         record = self.root / ('var/lib/dpkg/info/linux-image-%s.md5sums' % KERNEL)
         record.write_text('%s  boot/vmlinuz-%s\n' % (hashlib.md5(b'evil kernel\n').hexdigest(), KERNEL))
         self.run_check(full=False)
-        self.assertEqual(self.status('kernel.image'), 'pass', 'documented weakness of the quick check')
+        self.assertEqual(self.status('kernel.image'), 'fail', 'the signed per-file list, not dpkg, is what counts')
+        self.assertIn('signed per-file list', self.reason('kernel.image'))
         self.run_check(full=True)
         self.assertEqual(self.status('kernel.image'), 'fail')
+
+    def test_newer_desos_kernel_from_the_update_channel_is_not_called_an_ubuntu_kernel(self):
+        status = self.root / 'var/lib/dpkg/status'
+        status.write_text(status.read_text() + '\nPackage: linux-image-6.18.70-desos\nStatus: install ok installed\n'
+                          'Architecture: amd64\nVersion: 6.18.70-1desos1\n')
+        self.put('proc/sys/kernel/osrelease', '6.18.70-desos\n')
+        result = self.run_check(full=False)
+        self.assertEqual(self.status('kernel.release'), 'unknown')
+        self.assertEqual(self.by_id['kernel.release']['details']['flavour'], 'desos-update')
+        self.assertEqual(result['state']['kernel'], 'other')
+        self.assertNotIn('Ubuntu', self.reason('kernel.release'))
+        self.assertEqual(self.status('kernel.image'), 'unknown')
 
     def test_live_session_also_checks_the_image_on_the_boot_medium(self):
         self.put('proc/cmdline', 'BOOT_IMAGE=/casper/vmlinuz-%s boot=casper quiet\n' % KERNEL)
@@ -581,8 +716,8 @@ class KernelTests(VerifyCase):
         self.assertEqual(self.status('kernel.provenance'), 'fail')
         self.assertEqual(self.status('kernel.config'), 'unknown')
 
-    def test_rewritten_provenance_config_hash_is_caught_by_the_full_check(self):
-        """Provenance is unsigned; only the full check ties the config to the signed package."""
+    def test_rewritten_provenance_config_hash_is_caught_by_the_quick_check_too(self):
+        """The provenance record is covered by the signed SHA256SUMS and the config by the signed file list."""
         path = self.root / 'usr/share/doc/desos/build/kernel-provenance.json'
         data = json.loads(path.read_text())
         data['config_sha256'] = sha('CONFIG_FIXTURE=n\n')
@@ -590,7 +725,9 @@ class KernelTests(VerifyCase):
         for name in ('boot/config-' + KERNEL, 'usr/share/doc/desos/build/config-' + KERNEL):
             self.put(name, 'CONFIG_FIXTURE=n\n')
         self.run_check(full=False)
-        self.assertEqual(self.status('kernel.config'), 'pass', 'documented weakness of the quick check')
+        self.assertEqual(self.status('signatures.evidence'), 'fail')
+        self.assertEqual(self.status('kernel.config'), 'fail')
+        self.assertIn('signed per-file list', self.reason('kernel.config'))
         self.run_check(full=True)
         self.assertEqual(self.status('kernel.config'), 'fail')
 
@@ -609,6 +746,94 @@ class KernelTests(VerifyCase):
         self.assertEqual(self.status('kernel.image'), 'pass')
         self.assertEqual(self.status('packages.files'), 'pass')
         self.assertEqual(result['counts']['fail'], 0)
+
+
+class EvidenceTests(VerifyCase):
+    BUILD = 'usr/share/doc/desos/build/'
+
+    def test_edited_or_added_or_missing_evidence_fails(self):
+        self.put(self.BUILD + 'source-pin.json', '{"version": "6.18.62"}')
+        self.run_check(full=False)
+        self.assertEqual(self.status('signatures.evidence'), 'fail')
+        self.assertIn('source-pin.json differs', self.reason('signatures.evidence'))
+        self.install_evidence(self.repository())
+        self.put(self.BUILD + 'extra-note.txt', 'not part of the build\n')
+        self.run_check(full=False)
+        self.assertIn('extra-note.txt is not covered', self.reason('signatures.evidence'))
+        (self.root / self.BUILD / 'extra-note.txt').unlink()
+        (self.root / self.BUILD / 'signature-status.txt').unlink()
+        self.run_check(full=False)
+        self.assertIn('signature-status.txt is missing', self.reason('signatures.evidence'))
+
+    def test_removing_the_signed_sums_does_not_downgrade_to_unknown(self):
+        for name in ('SHA256SUMS.asc', 'SHA256SUMS'):
+            (self.root / self.BUILD / name).unlink()
+            self.run_check(full=False)
+            self.assertEqual(self.status('signatures.evidence'), 'fail')
+            self.assertIn('signed manifest says', self.reason('signatures.evidence'))
+
+    def test_validly_signed_sums_of_another_build_are_refused(self):
+        build = self.root / self.BUILD
+        (build / 'source-pin.json').write_text('{"archive_sha256": "%s", "version": "6.18.62", "maintainers": [{"fingerprint": "%s"}], "pinned_on": "another day"}'
+                                               % ('a' * 64, 'F' * 40))
+        lines = (build / 'SHA256SUMS').read_text().splitlines()
+        (build / 'SHA256SUMS').write_text(''.join(
+            ('%s  source-pin.json' % sha((build / 'source-pin.json').read_bytes()) if line.endswith('  source-pin.json') else line) + '\n'
+            for line in lines))
+        (build / 'SHA256SUMS.asc').unlink()
+        gpg(self.fixture.homes[0], '--armor', '--output', str(build / 'SHA256SUMS.asc'), '--detach-sign', str(build / 'SHA256SUMS'))
+        self.run_check(full=False)
+        self.assertEqual(self.status('signatures.evidence'), 'fail')
+        self.assertIn('another build', self.reason('signatures.evidence'))
+
+    def test_sums_signed_by_another_key_fail(self):
+        build = self.root / self.BUILD
+        (build / 'SHA256SUMS.asc').write_bytes((self.fixture.repos[1] / 'build-evidence/SHA256SUMS.asc').read_bytes())
+        self.run_check(full=False)
+        self.assertEqual(self.status('signatures.evidence'), 'fail')
+
+
+class ImageWithoutTheNewEvidenceTests(VerifyCase):
+    """A 0.1 image: no per-file lists in the manifest, no signed SHA256SUMS."""
+    def repository(self):
+        return self.fixture.legacy
+
+    def test_missing_evidence_is_unknown_and_never_a_failure(self):
+        result = self.run_check(full=False)
+        self.assertEqual(result['counts']['fail'], 0)
+        self.assertEqual(result['overall'], 'unknown')
+        self.assertEqual({c['id'] for c in result['checks'] if c['status'] == 'unknown'},
+                         {'signatures.evidence', 'packages.key-files'})
+        self.assertIn('before 0.2', self.reason('signatures.evidence'))
+        self.assertIn('before 0.2', self.reason('packages.key-files'))
+        self.assertEqual(dv.main(['--quick', '--quiet'], config=self.config()), 0)
+        result = self.run_check(full=True)
+        self.assertEqual({c['id']: c['status'] for c in result['checks'] if c['status'] != 'pass'},
+                         {'signatures.evidence': 'unknown'})
+        self.assertFalse(self.by_id['kernel.provenance']['details']['evidence_signed'])
+        self.assertIn('itself unsigned', self.reason('kernel.provenance'))
+        # The kernel build's own, unsigned SHA256SUMS lying there changes nothing.
+        self.put('usr/share/doc/desos/build/SHA256SUMS', 'not signed\n')
+        self.run_check(full=False)
+        self.assertEqual(self.status('signatures.evidence'), 'unknown')
+
+    def test_quick_kernel_checks_fall_back_to_the_weaker_comparisons(self):
+        self.run_check(full=False)
+        self.assertEqual(self.status('kernel.image'), 'pass')
+        self.assertEqual(self.by_id['kernel.image']['details']['method'], 'dpkg-md5')
+        self.assertIn('weak', self.reason('kernel.image'))
+        self.assertEqual(self.by_id['kernel.config']['details']['method'], 'provenance-sha256')
+        self.assertEqual(self.by_id['kernel.config']['details']['evidence'], 'unsigned-provenance')
+        self.assertEqual(self.status('identity.os-release'), 'pass')
+
+    def test_the_documented_weaknesses_of_the_old_quick_check_remain(self):
+        self.put('boot/vmlinuz-' + KERNEL, 'evil kernel\n')
+        record = self.root / ('var/lib/dpkg/info/linux-image-%s.md5sums' % KERNEL)
+        record.write_text('%s  boot/vmlinuz-%s\n' % (hashlib.md5(b'evil kernel\n').hexdigest(), KERNEL))
+        self.run_check(full=False)
+        self.assertEqual(self.status('kernel.image'), 'pass')
+        self.run_check(full=True)
+        self.assertEqual(self.status('kernel.image'), 'fail')
 
 
 class IdentityTests(VerifyCase):
@@ -705,10 +930,10 @@ class OutputTests(VerifyCase):
         line = (run / 'verify-status').read_text()
         self.assertEqual(line.count('\n'), 1)
         self.assertEqual(line.strip(), full['summary'])
-        self.assertIn('16 of 16 full checks passed', line)
+        self.assertIn('17 of 17 full checks passed', line)
 
     def test_quick_result_carries_the_last_full_outcome_into_the_status_line(self):
-        self.put('usr/bin/des-ui', 'changed\n', 0o755)
+        self.put('usr/share/des-ui/.hidden', 'changed\n')
         self.assertEqual(dv.main(['--write', '--quiet'], config=self.config()), 1)
         self.assertEqual(dv.main(['--quick', '--write', '--quiet'], config=self.config()), 0)
         quick = json.loads((self.root / 'run/desos/verify.json').read_text())
@@ -759,7 +984,7 @@ class OutputTests(VerifyCase):
         self.put('usr/share/doc/desos/build/kernel-provenance.json', '{"kernel_release": "6.18.62-desos", "packages": 5}')
         result = self.run_check(full=False)
         self.assertEqual(self.status('kernel.provenance'), 'unknown')
-        self.assertEqual(len(result['checks']), 14)
+        self.assertEqual(len(result['checks']), 16)
 
 
 class PathTests(unittest.TestCase):
@@ -785,8 +1010,10 @@ class PathTests(unittest.TestCase):
 class ComponentConventionTests(unittest.TestCase):
     def test_component_metadata_and_tree_follow_the_convention(self):
         data = json.loads((COMPONENT / 'component.json').read_text())
-        self.assertEqual(sorted(data), ['enable_units', 'name', 'notes', 'packages'])
+        self.assertEqual(sorted(data), ['enable_units', 'name', 'notes', 'package', 'packages'])
         self.assertEqual(data['name'], 'verify')
+        # Delivered inside the signed desos-verify package, not copied in from rootfs/.
+        self.assertEqual(data['package'], 'desos-verify')
         self.assertIn('gpgv', data['packages'])
         self.assertTrue((COMPONENT / 'README.md').is_file())
         units = COMPONENT / 'rootfs/usr/lib/systemd/system'

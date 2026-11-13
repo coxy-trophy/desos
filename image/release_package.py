@@ -10,7 +10,11 @@ import tempfile
 
 
 PACKAGE = "desos-release"
-VERSION = "0.1.0~preview1"
+# The package version, not the DesOS release: os-release below still says
+# 0.1.0-preview1. "+1" marks the rebuild whose content changed
+# (VERSION_CODENAME) after 0.1.0~preview1 had shipped in the 0.1 image; a
+# version is never reused for different bytes (image/package-ledger.json).
+VERSION = "0.1.0~preview1+1"
 EPOCH = 1794268800
 # VERSION_CODENAME names the apt suite third-party tools build sources from
 # (lsb_release -cs, add-apt-repository, vendor install scripts), so it must be

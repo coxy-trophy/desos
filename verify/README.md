@@ -11,8 +11,12 @@ local edits and unsophisticated tampering. It does **not** defeat an attacker
 with root, who can replace this tool or the key it trusts.
 
 Nothing here has run on a booted DesOS image yet. The logic is tested against
-fixture systems and against the real 0.1 repository, key and kernel evidence in
-`output/`; unit behaviour under systemd on the target is unverified.
+fixture systems; unit behaviour under systemd on the target is unverified. The
+signed per-file lists, the signed build evidence and the `desos-verify`
+package described below exist from the 0.2 build recipe on and have never been
+built into an image. A 0.1 image has none of them: there the two checks that
+need them report **unknown** (never fail) and the kernel checks fall back to
+the weaker comparisons.
 
 ## Using it
 
@@ -28,7 +32,7 @@ Run it as root: `/boot/vmlinuz-*` is readable only by root, and without it
 
 | Option | Effect |
 | --- | --- |
-| `--quick` | Skip `repository.pool` and `packages.files`; use weaker kernel comparisons (see table). |
+| `--quick` | Skip `repository.pool` and `packages.files`; compare the kernel and the programs with the signed per-file lists instead of the packages (see table). |
 | `--json` | Print the result object instead of the summary. |
 | `--write` | Also store the result (see [Files](#files-written)). Needs root. |
 | `--quiet` | Print nothing. |
@@ -53,15 +57,17 @@ key, not a production one.
 | `signatures.key` | yes | `/usr/share/keyrings/desos-archive-keyring.asc` holds exactly one primary key; its fingerprint is computed and reported | missing, unparsable, more than one key, or not the `--expect-fingerprint` value |
 | `signatures.manifest` | yes | `manifest.json.asc` over `manifest.json`, with `gpgv` and a temporary keyring containing only that key | bad signature, another signer, malformed manifest, `.incomplete` marker |
 | `signatures.release` | yes | `Release.gpg` over `Release`; `InRelease`; the text signed inside `InRelease` equals `Release` | any of those do not hold |
+| `signatures.evidence` | yes | `SHA256SUMS.asc` over `SHA256SUMS` in `/usr/share/doc/desos/build`; that `SHA256SUMS` is the one the signed manifest names; every file in the directory is listed and matches | bad signature, another signer, a `SHA256SUMS` from another build, an edited, missing or unlisted file, or the manifest naming evidence that is absent. *Unknown* on an image whose manifest names none and that ships no `SHA256SUMS` (0.1) |
 | `repository.index` | yes | manifest `artifacts` hashes, `Release` → `Packages` hash, `Packages` entries ↔ manifest packages, trusted keyring = repository copy | any disagreement |
 | `repository.pool` | no | SHA-256 of every `.deb` in the shipped pool against the signed manifest | a package is missing or differs |
 | `packages.installed` | yes | dpkg's status database: each manifest package is `install ok installed` at the manifest version | `des-ui` or `desos-release` removed, other version, broken state |
-| `packages.files` | no | every file of every manifest package, re-hashed against the payload of its signature-checked `.deb` | content, symlink target or mode bits differ, or a file is missing |
-| `kernel.provenance` | yes | `kernel-provenance.json` names the kernel image package by the same SHA-256 as the signed manifest; `source-pin.json`, `signature-status.txt` and `desktop-pin.json` agree with it | the unsigned evidence contradicts the signed manifest |
+| `packages.key-files` | quick only | programs, units and DesOS helpers (`/usr/bin/*`, `/usr/sbin/*`, `/usr/lib/systemd/system/*`, `/usr/lib/desos/*`) of every installed manifest package, SHA-256 against the package's signed per-file list. No `.deb` is unpacked | a listed file is missing, not a regular file, or differs; a list is missing or is not the one the manifest names. *Unknown* when the manifest carries no lists (0.1), or when files were left unhashed by the 256 MiB limit |
+| `packages.files` | no | every file of every manifest package, re-hashed against the payload of its signature-checked `.deb`; the signed per-file list, where present, must describe that payload exactly | content, symlink target or mode bits differ, a file is missing, or list and package disagree |
+| `kernel.provenance` | yes | `kernel-provenance.json` names the kernel image package by the same SHA-256 as the signed manifest; `source-pin.json`, `signature-status.txt` and `desktop-pin.json` agree with it | the evidence contradicts the signed manifest |
 | `kernel.release` | yes | running release (`/proc/sys/kernel/osrelease`) against the provenance record | running a kernel that is neither the DesOS one nor an installed Ubuntu kernel package |
-| `kernel.image` | weak | `/boot/vmlinuz-<release>` (and `/cdrom/casper/vmlinuz-<release>` in a live session). Full: SHA-256 against the file inside the signed kernel package. Quick: MD5 against dpkg's own record | the file differs |
-| `kernel.config` | weak | `/boot/config-<release>`, the shipped evidence copy and, if the kernel exposes it, `/proc/config.gz`, against `config_sha256` in the provenance. Full also checks that value against the signed kernel package | any differs |
-| `identity.os-release` | yes | `ID=desos`, and the file is byte-identical to the one in the signed `desos-release` package (that package is tiny, so this is done in quick mode too) | another identity or an edited file |
+| `kernel.image` | yes | `/boot/vmlinuz-<release>` (and `/cdrom/casper/vmlinuz-<release>` in a live session). Full: SHA-256 against the file inside the signed kernel package. Quick: SHA-256 against the signed per-file list of that package; on an image without lists, MD5 against dpkg's own record (weak) | the file differs |
+| `kernel.config` | yes | `/boot/config-<release>`, the shipped evidence copy and, if the kernel exposes it, `/proc/config.gz`, against `config_sha256` in the provenance. That value is also checked against the signed kernel package (full) or its signed per-file list (quick); without lists the quick check stops at the provenance | any differs |
+| `identity.os-release` | yes | `ID=desos`, and the file is byte-identical to the one in the signed `desos-release` package (quick: by its signed per-file list; without lists by unpacking that tiny package) | another identity or an edited file |
 | `identity.apt-sources` | yes | exactly one enabled source for the shipped repository, defined as shipped; nothing else uses the DesOS key; no source disables signature checking | see below |
 | `state.secure-boot` | yes | firmware `SecureBoot` variable | never; reports `enabled` / `disabled` / `unsupported` |
 | `state.live-session` | yes | `boot=casper` on the kernel command line | never; reports `live` / `installed` |
@@ -71,6 +77,19 @@ Conventions that consumers should know:
 
 - **Nothing unsigned is trusted.** If the manifest signature does not verify,
   every check that needs the manifest is `unknown`, never `pass`.
+- **Missing newer evidence is `unknown`, not `fail`.** An image built before
+  the per-file lists and the signed `SHA256SUMS` existed is not accused of
+  anything: `signatures.evidence` and `packages.key-files` are `unknown`, so
+  `overall` is `unknown` and the exit status stays 0. The reverse does not
+  hold: once the signed manifest names build evidence or a list, removing it
+  is a `fail`, so the evidence cannot be stripped to get back to `unknown`.
+- **A newer DesOS kernel from the update channel is `unknown`.** A running
+  `*-desos` kernel that is installed as a package but is not the one in this
+  image's manifest gives `kernel.release` `unknown` with `state.kernel`
+  `other`. Note that after any upgrade from a network channel
+  `packages.installed` **fails** for the upgraded packages, because the tool
+  compares only with the repository shipped in the image; teaching it to
+  follow the channel's signed indexes is not done.
 - **The Ubuntu compatibility kernel is not a failure.** `kernel.release`,
   `kernel.image` and `kernel.config` become `unknown` with a reason saying the
   Ubuntu kernel is running and DesOS evidence does not cover it;
@@ -115,11 +134,40 @@ an SSD and noticeably longer from a live USB stick. The service runs it at idle
 CPU and I/O priority. Ownership (uid/gid) is not compared. Files that belong to
 no package are not noticed.
 
-The quick check cannot afford this, so it does not look at package files at
-all, and it compares the kernel image only with dpkg's MD5 record. A quick pass
-of `kernel.image` or `kernel.config` therefore says much less than a full one;
-`details.method` records which was used (`dpkg-md5`, `provenance-sha256` or
-`signed-sha256`).
+The quick check cannot afford this. It uses the **signed per-file lists**
+instead: `image/component_repo.py` writes, for every package,
+`file-lists/NAME_VERSION_ARCH.sha256` (plain `sha256sum` format, paths relative
+to `/`) and puts each list's SHA-256 into the signed manifest. The quick check
+verifies the list against the manifest and then hashes only the kernel image,
+the kernel configuration, `os-release` and the programs and units named under
+`packages.key-files`; it runs no `dpkg-deb`. For the 0.1 packages those key
+files are about 85 MB, which has **not** been timed on a target; hashing stops
+at 256 MiB and says so. Mode bits, symlinks, libraries, kernel modules and
+everything else stay with the full check.
+
+`details.method` records the comparison (`signed-sha256`, `provenance-sha256`
+or `dpkg-md5`) and `details.evidence` where the expected value came from
+(`package`, `file-list`, `signed-provenance`, `unsigned-provenance`). On an
+image without lists the quick `kernel.image` is still only dpkg's MD5 and
+says much less than a full one.
+
+### Where each signature is made
+
+The private key exists only in the dedicated GnuPG home on the host. The image
+worker never holds it and signs nothing.
+
+| Evidence | Signed | How it reaches the image |
+| --- | --- | --- |
+| `manifest.json`, `Release`, `InRelease` | host, `component_repo.py` | repository copied in by `finalize-rootfs.sh` |
+| per-file lists | host, same run: hashed into the signed manifest | inside the repository (`file-lists/`) |
+| build evidence `SHA256SUMS` | host, same run (`--evidence` files, all of which exist before the image is built): detached `SHA256SUMS.asc`, and its hash in the signed manifest | `finalize-rootfs.sh` copies `build-evidence/` from the repository to `/usr/share/doc/desos/build` and refuses a repository without it |
+| `desos-verify` itself | host: `image/verify_package.py` builds the package, which is one more entry of the signed repository | installed as a package; `image/components.py` no longer copies `verify/rootfs` |
+
+Evidence that only exists after the worker has run (the rootfs package
+manifest, the seal receipt, the ISO hash) is therefore **not** signed and not
+checked by this tool; it belongs with the release artifacts. Before sealing,
+`finalize-rootfs.sh` runs the shipped tool against the tree (offline, quick)
+and stops on any failed check or unverified signature.
 
 ## JSON result (schema `desos-verify-v1`)
 
@@ -131,11 +179,11 @@ for the keys named below.
 ```json
 {
   "schema": "desos-verify-v1",
-  "tool_version": 1,
+  "tool_version": 2,
   "mode": "quick",
   "overall": "pass",
-  "summary": "DesOS consistent with its signed evidence (14 of 14 quick checks passed)",
-  "counts": {"pass": 14, "fail": 0, "unknown": 0},
+  "summary": "DesOS consistent with its signed evidence (16 of 16 quick checks passed)",
+  "counts": {"pass": 16, "fail": 0, "unknown": 0},
   "started": "2026-11-12T09:00:00Z",
   "finished": "2026-11-12T09:00:01Z",
   "duration_seconds": 0.412,
@@ -159,7 +207,7 @@ for the keys named below.
   ],
   "skipped": ["repository.pool", "packages.files"],
   "last_full": {"overall": "pass", "finished": "2026-11-11T21:14:03Z",
-                "counts": {"pass": 16, "fail": 0, "unknown": 0},
+                "counts": {"pass": 17, "fail": 0, "unknown": 0},
                 "failed": [], "same_manifest": true},
   "assurance": "self-reported by software on the system being checked; …"
 }
@@ -184,9 +232,12 @@ for the keys named below.
 | `state.root_filesystem` | string \| null | Filesystem type of `/`. |
 | `state.session` | `live` \| `installed` \| `unknown` | |
 | `checks[]` | array | In a fixed order. Each has `id`, `group` (the part of `id` before the dot), `status`, `reason` (one printable line, at most 300 characters) and `details`. |
+| `tool_version` | integer | 2 since `signatures.evidence` and `packages.key-files` exist (1 before). The schema is unchanged: both are new check ids, which consumers were already told to expect. |
 | `checks[].details.method` | string | On `kernel.image` and `kernel.config`: `signed-sha256`, `provenance-sha256` or `dpkg-md5`. |
+| `checks[].details.evidence` | string | On passing `kernel.image` and `kernel.config`: `package`, `file-list`, `signed-provenance` or `unsigned-provenance`. Absent when dpkg's MD5 was used. |
+| `checks[].details.evidence_signed` | bool | On `kernel.provenance`: whether `signatures.evidence` passed in this run. |
 | `checks[].details.value` | string | On the three `state.*` checks: the same value as in `state`. |
-| `skipped` | array of string | Check ids not run in this mode. They do not appear in `checks`. |
+| `skipped` | array of string | Check ids not run in this mode. They do not appear in `checks`. Quick: `repository.pool`, `packages.files`. Full: `packages.key-files` (covered by `packages.files`). |
 | `last_full` | object \| null | Quick results only: outcome of the stored last full check. `same_manifest` is false if it was made against a different manifest. |
 | `assurance` | string | Fixed reminder of the limits below. |
 
@@ -229,17 +280,26 @@ not make greetd depend on the result.
 
 `component.json` asks for `desos-verify-quick.service` and
 `desos-verify-full.timer` to be enabled and for `python3`, `gpgv` and `dpkg`
-to be present.
+to be present. Its `package` key names `desos-verify`: the tool, units and
+tmpfiles rule under `rootfs/` are the source of that package
+(`image/verify_package.py`, no maintainer scripts) and reach the image only
+inside it. Any change under `rootfs/` needs a new `VERSION` there, or the
+repository builder's ledger refuses the rebuilt package. An upgrade of the
+package does not enable or restart the units by itself.
 
 ## What a pass does and does not prove
 
 The chain is: shipped key → signature on `manifest.json` → SHA-256 of each
-`.deb` → SHA-256 of each installed file, kernel image and kernel config.
+`.deb` and of each per-file list → SHA-256 of each installed file, kernel image
+and kernel config; and shipped key → signature on `SHA256SUMS` (also named in
+the manifest) → SHA-256 of each build evidence file.
 
-**It proves**, when the full check passes, that the installed DesOS packages,
-kernel image file, kernel configuration file and release identity are
-byte-identical to what the holder of that key signed, and that the unsigned
-build evidence in `/usr/share/doc/desos/build` does not contradict it.
+**It proves**, when the full check passes, that the installed DesOS packages
+(now including `desos-verify`), kernel image file, kernel configuration file
+and release identity are byte-identical to what the holder of that key signed,
+and that the build evidence in `/usr/share/doc/desos/build` is the evidence
+signed with that repository and does not contradict it. On a 0.1 image the
+evidence is unsigned and only shown not to contradict the manifest.
 
 **It does not prove any of the following.**
 
@@ -250,9 +310,12 @@ build evidence in `/usr/share/doc/desos/build` does not contradict it.
    obtained elsewhere, and `--expect-fingerprint` makes that comparison
    mechanical, but a tool on the same disk can be replaced too.
 2. *That this tool is the real tool.* `desos-verify`, its units and Python
-   itself are files on the same disk. The verifier is currently copied onto
-   the image outside any signed package, so it is not even covered by its own
-   check.
+   itself are files on the same disk. Since 0.2 the verifier is a signed
+   package, so its files are in the manifest and are re-hashed by
+   `packages.key-files` and `packages.files`; that catches damage and careless
+   edits. It does not close this point: a replaced verifier can report
+   anything about itself, and Python and `gpgv` come from Ubuntu and are not
+   checked here.
 3. *What is running in memory.* The kernel image check hashes the file the
    boot loader would be given, not the code that booted. Loaded modules, a
    kexec'd kernel and running processes are not examined. The kernel has
@@ -268,8 +331,16 @@ build evidence in `/usr/share/doc/desos/build` does not contradict it.
    units added by hand, cron jobs and home directories are not examined.
 6. *Anything between runs.* The quick check runs once per boot and the full
    check daily; the stored result describes the moment it was taken.
-7. *Much, in quick mode.* See above: no package file hashes, and the kernel
-   image against an MD5 that the same attacker can rewrite.
+7. *Everything, in quick mode.* With per-file lists the quick check ties the
+   kernel image, kernel configuration, release identity and the DesOS programs
+   and units to the signature by SHA-256, but not libraries, kernel modules,
+   data files, mode bits or symlinks. Without lists (0.1 image) it hashes no
+   package files and compares the kernel image with an MD5 that the same
+   attacker can rewrite.
+8. *That the builder was honest.* The signed lists and the signed
+   `SHA256SUMS` say what the key holder's tools wrote down on the build host.
+   They add no protection against whoever holds the key, and none of the
+   evidence produced later inside the image worker is signed.
 
 The result files are root-writable, so a displayed "verified" line is only as
 trustworthy as root on that machine.
@@ -312,9 +383,12 @@ consistency checker, not as a security boundary.
 ## Testing
 
 `python3 -m unittest tests.test_verify` builds three small packages, generates
-two throwaway keys in temporary GnuPG homes, signs a repository with the real
-`image/component_repo.py`, installs it into a temporary root and runs the tool
-against it. Every path is resolved beneath an injectable root
+two throwaway keys in temporary GnuPG homes, signs a repository (with per-file
+lists and build evidence) with the real `image/component_repo.py`, installs it
+into a temporary root and runs the tool against it. The same repository with
+the lists and the evidence signature stripped and the manifest signed again
+stands in for a 0.1 image. `tests.test_desos_packages` builds the
+`desos-verify` package and checks it holds exactly `verify/rootfs`. Every path is resolved beneath an injectable root
 (`Config(root=…)`), absolute symlinks included, and commands go through an
 injectable `Runner`, so no test needs root or reads the user's keyring. The
 tests need `gpg`, `gpgv`, `dpkg-deb` and `apt-ftparchive` or

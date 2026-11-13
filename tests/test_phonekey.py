@@ -148,6 +148,10 @@ class Fixture(unittest.TestCase):
         self.asked = []
         self.proc = Path(self.temp.name) / 'proc'
         self.parent(['sudo', 'apt', 'upgrade'])
+        # By default the request comes from a graphical session on the local seat.
+        self.cgroup('0::/user.slice/user-1000.slice/session-3.scope\n')
+        self.session = {'Remote': 'no', 'Seat': 'seat0', 'Class': 'user', 'Type': 'wayland', 'Service': 'greetd'}
+        self.sessions_asked = []
 
     # -- fixtures --
     def write_store(self, phones, key='enrolled'):
@@ -164,6 +168,16 @@ class Fixture(unittest.TestCase):
         directory.mkdir(parents=True)
         os.symlink(exe, directory / 'exe')
         (directory / 'cmdline').write_bytes(b'\0'.join(word if isinstance(word, bytes) else word.encode() for word in argv) + b'\0')
+
+    def cgroup(self, text):
+        (self.proc / 'self').mkdir(parents=True, exist_ok=True)
+        (self.proc / 'self/cgroup').write_text(text)
+
+    def logind(self, session_id):
+        self.sessions_asked.append(session_id)
+        if isinstance(self.session, Exception):
+            raise self.session
+        return dict(self.session)
 
     def tool(self, *argv, stdin=''):
         out, err = io.StringIO(), io.StringIO()
@@ -195,10 +209,13 @@ class Fixture(unittest.TestCase):
             return answer if isinstance(answer, bytes) else json.dumps(answer).encode()
         return send
 
-    def auth(self, send=None, service='sudo', user=None, pam_type='auth', paths=None):
+    def auth(self, send=None, service='sudo', user=None, pam_type='auth', paths=None, **pam):
         self.out = io.StringIO()
-        env = {'PAM_TYPE': pam_type, 'PAM_SERVICE': service, 'PAM_USER': ME.pw_name if user is None else user}
-        return tool.pam_auth(paths or self.paths, env, send=send or self.phone(), out=self.out, clock=lambda: self.now, parent=4242, proc=str(self.proc))
+        env = {'PAM_TYPE': pam_type, 'PAM_SERVICE': service, 'PAM_USER': ME.pw_name if user is None else user,
+               'PAM_TTY': '/dev/pts/2', 'PAM_RHOST': ''}
+        env.update(pam)
+        return tool.pam_auth(paths or self.paths, env, send=send or self.phone(), out=self.out, clock=lambda: self.now,
+                             parent=4242, proc=str(self.proc), session=self.logind)
 
     def log(self):
         path = self.root / 'var/log/desos-phonekey.log'
@@ -614,6 +631,98 @@ class Approval(Fixture):
         self.assertIn('polkit', describe('polkit-1'))
         self.assertNotIn('true', describe('polkit-1'), 'PAM is not told the polkit action, so none is claimed')
         self.assertTrue(tool.valid_action(describe('polkit-1')))
+
+
+class Locality(Fixture):
+    """Phone approval is declined for remote sessions and whenever locality cannot be shown."""
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.enable()[0], 0)
+
+    def declined(self, reason):
+        self.assertEqual(self.auth(), 1)
+        self.assertEqual(self.asked, [], 'the phone must not even be asked')
+        entry = self.log()[-1]
+        self.assertEqual((entry['event'], entry['reason']), ('skipped', reason))
+        self.assertIn('use your password', self.out.getvalue())
+        self.assertNotIn('Approve on', self.out.getvalue())
+        return entry
+
+    def test_a_local_session_on_a_seat_is_asked_and_the_session_comes_from_the_cgroup(self):
+        self.assertEqual(self.auth(), 0)
+        self.assertEqual(self.sessions_asked, ['3'])
+        self.assertEqual(self.log()[-1]['tty'], '/dev/pts/2')
+        self.session.update(Type='tty', Service='login')
+        self.now += 100
+        self.assertEqual(self.auth(PAM_TTY='/dev/tty2'), 0, 'a text console on the seat is local too')
+
+    def test_sudo_in_an_ssh_session_falls_through_to_the_password(self):
+        self.cgroup('0::/user.slice/user-1000.slice/session-7.scope\n')
+        self.session = {'Remote': 'yes', 'Seat': '', 'Class': 'user', 'Type': 'tty', 'Service': 'sshd'}
+        entry = self.declined('remote_session')
+        self.assertEqual(self.sessions_asked, ['7'])
+        self.assertIn('session 7', entry['detail'])
+        # Nothing was counted against the phone: no cooldown, no failure.
+        self.assertFalse((self.root / f'var/lib/desos-phonekey/{ME.pw_name}.state').exists())
+        self.session = {'Remote': 'no', 'Seat': 'seat0', 'Class': 'user', 'Type': 'tty', 'Service': 'sshd'}
+        self.declined('remote_session')
+
+    def test_a_remote_host_named_by_pam_is_refused_without_asking_logind(self):
+        self.assertEqual(self.auth(PAM_RHOST='203.0.113.9'), 1)
+        self.assertEqual((self.asked, self.sessions_asked), ([], []))
+        self.assertEqual(self.log()[-1]['reason'], 'remote_session')
+        self.assertEqual(self.log()[-1]['rhost'], '203.0.113.9')
+        # sudo's pam_rhost option reports this machine's own name: not evidence of a remote user.
+        self.assertEqual(self.auth(PAM_RHOST=socket.gethostname()), 0)
+
+    def test_it_fails_closed_when_it_cannot_tell(self):
+        cases = {
+            'a user-manager scope (systemd-run --user), not a login session': '0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u12.scope\n',
+            'a system service': '0::/system.slice/polkit-agent-helper@3.service\n',
+            'no usable line': 'garbage\n',
+            'two different sessions': '1:name=systemd:/user.slice/user-1000.slice/session-3.scope\n0::/user.slice/user-1000.slice/session-4.scope\n',
+            'a name that only looks like a scope': '0::/user.slice/xsession-3.scope.d\n',
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.cgroup(text)
+                self.declined('locality_unknown')
+        self.assertEqual(self.sessions_asked, [])
+        (self.proc / 'self/cgroup').unlink()
+        self.declined('locality_unknown')
+        self.cgroup('0::/user.slice/user-1000.slice/session-3.scope\n')
+        for session in (tool.Refused('loginctl could not describe the session'), OSError('no loginctl'),
+                        subprocess.TimeoutExpired('loginctl', 5), {}, {'Remote': 'no', 'Seat': '', 'Class': 'user'},
+                        {'Remote': 'no', 'Seat': 'seat0', 'Class': 'greeter'}, {'Seat': 'seat0', 'Class': 'user'}):
+            with self.subTest(session=session):
+                self.session = session
+                self.declined('locality_unknown')
+
+    def test_the_callers_environment_is_not_evidence(self):
+        self.session = {'Remote': 'yes', 'Seat': '', 'Class': 'user', 'Type': 'tty', 'Service': 'sshd'}
+        self.assertEqual(self.auth(XDG_SESSION_ID='3', XDG_SEAT='seat0', PAM_TTY='/dev/tty1'), 1)
+        self.assertEqual(self.asked, [])
+
+    def test_someone_not_enrolled_is_still_told_and_logged_nothing(self):
+        self.session = {'Remote': 'yes', 'Seat': '', 'Class': 'user'}
+        before = self.log()
+        self.assertEqual(self.auth(user='someone-else'), 1)
+        self.assertEqual((self.out.getvalue(), self.log()), ('', before))
+
+    def test_the_real_query_asks_loginctl_for_exactly_that_session(self):
+        seen = {}
+
+        def fake(argv, **options):
+            seen['argv'], seen['env'] = argv, options['env']
+            return types.SimpleNamespace(returncode=0, stdout=b'Remote=no\nSeat=seat0\nClass=user\nType=wayland\nService=greetd\n')
+        with patch.object(tool.subprocess, 'run', side_effect=fake):
+            self.assertEqual(tool.locality({'PAM_RHOST': ''}, str(self.proc)), (True, 'session 3 on seat0'))
+        self.assertEqual(seen['argv'][:3], ['/usr/bin/loginctl', 'show-session', '3'])
+        self.assertNotIn('XDG_SESSION_ID', seen['env'])
+        with patch.object(tool.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1, stdout=b'')):
+            self.assertFalse(tool.locality({'PAM_RHOST': ''}, str(self.proc))[0])
+        source = TOOL.read_text()
+        self.assertIn("'PAM_RHOST', 'PAM_TTY'", source)
 
 
 class Wire(unittest.TestCase):

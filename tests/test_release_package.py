@@ -39,7 +39,16 @@ class ReleasePackageTests(unittest.TestCase):
     def test_archive_has_expected_identity_ownership_and_no_essential_replacement(self):
         fields = subprocess.check_output(["dpkg-deb", "--field", str(self.deb)], text=True)
         self.assertIn("Package: desos-release\n", fields)
-        self.assertIn("Version: 0.1.0~preview1\n", fields)
+        # The content changed (VERSION_CODENAME) after 0.1.0~preview1 shipped, so
+        # the package version moved on; the DesOS release strings did not.
+        self.assertIn("Version: 0.1.0~preview1+1\n", fields)
+        subprocess.run(["dpkg", "--compare-versions", self.builder.VERSION, "gt", "0.1.0~preview1"], check=True)
+        ledger = json.loads((SOURCE.parent / "package-ledger.json").read_text())
+        shipped = [entry for entry in ledger["packages"] if entry["package"] == "desos-release"]
+        self.assertIn("0.1.0~preview1", [entry["version"] for entry in shipped])
+        for entry in shipped:
+            if entry["version"] == self.builder.VERSION:
+                self.assertEqual(entry["sha256"], self.result["sha256"], "same version, different bytes")
         self.assertIn("Architecture: all\n", fields)
         self.assertIn("Depends: base-files, dpkg", fields)
         self.assertNotIn("Replaces:", fields)

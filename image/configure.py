@@ -25,8 +25,10 @@ Suites: desos
 Components: main
 Signed-By: {ARCHIVE_KEYRING}
 '''
-# Package names DesOS itself supplies (desktop, release identity, upstream kernel).
-DESOS_PACKAGE_PATTERNS = 'des-ui des-ui-* desos-* linux-image-*-desos linux-headers-*-desos'
+# Package names DesOS itself supplies (desktop, release identity, upstream kernel
+# and the metapackages that follow it).
+DESOS_PACKAGE_PATTERNS = ('des-ui des-ui-* desos-* linux-image-*-desos linux-headers-*-desos '
+                          'linux-image-desos linux-headers-desos')
 APT_PREFERENCES = f'''Explanation: DesOS supplies these packages; its signed origin outranks every
 Explanation: other archive (990 beats the default 500 without forcing downgrades).
 Package: {DESOS_PACKAGE_PATTERNS}
@@ -74,6 +76,10 @@ fi
 exec /usr/bin/des-ui-session "$@"
 '''
 
+# Runs from /etc/kernel/postinst.d and postrm.d after update-grub (zzzz sorts
+# last), and from the installer. The newest installed -desos kernel by version
+# sort becomes the saved default, so a kernel upgrade delivered through
+# linux-image-desos is booted next and removing the old one re-selects.
 SELECT_KERNEL = '''#!/usr/bin/python3
 import pathlib,subprocess,re
 boot=pathlib.Path('/boot');cfg=boot/'grub/grub.cfg'

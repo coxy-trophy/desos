@@ -1,6 +1,7 @@
 {
   "name": "verify",
+  "package": "desos-verify",
   "packages": ["python3", "gpgv", "dpkg"],
   "enable_units": ["desos-verify-quick.service", "desos-verify-full.timer"],
-  "notes": "desos-verify checks the running system against the signed repository manifest and build evidence already shipped under /usr/share/desos/repository and /usr/share/doc/desos/build. Results: /run/desos/verify.json, /run/desos/verify-status (one line for the greeter/desktop), /var/lib/desos/verify-full.json. Schema desos-verify-v1 is documented in verify/README.md. These files are copied onto the image outside any signed package, so the verifier itself is not covered by the manifest it checks; see README."
+  "notes": "desos-verify checks the running system against the signed repository manifest and the signed build evidence shipped under /usr/share/desos/repository and /usr/share/doc/desos/build. Results: /run/desos/verify.json, /run/desos/verify-status (one line for the greeter/desktop), /var/lib/desos/verify-full.json. Schema desos-verify-v1 is documented in verify/README.md. rootfs/ is the source of the desos-verify package (image/verify_package.py); it reaches the image inside that signed package and is not copied in by image/components.py."
 }

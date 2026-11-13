@@ -1,0 +1,55 @@
+{
+  "note": "First SHA-256 seen for every DesOS package name, version and architecture. image/component_repo.py and image/publish_channel.py refuse a package whose bytes differ from its entry: raise the package version instead of editing this file. New entries are appended by a successful repository build; commit them.",
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "des-ui",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "7e4098ffbd51b338586fb6c2ec65a413069f876be74dbb5e1df90d205b87afa7",
+      "version": "0.1.1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "des-ui-greeter",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "2a4724d5faf70f888f3ba6e7dc3c11402f6fbab8133eaaea2d7746595984343c",
+      "version": "0.1.1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "des-ui-music",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "598a3602ef3a67bafef3859296ef7375c371a62d12c3c8c3300b8abd038b406a",
+      "version": "0.1.1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "des-ui-plymouth",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "1f83fa964c3cabd68d2f91b5f5a52cac2f6131451fd5445a288cda304e173535",
+      "version": "0.1.1"
+    },
+    {
+      "architecture": "all",
+      "package": "desos-release",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "8ec3cc56b77607fead0bd474d9f18f869aa194ebad37abd956d5a20fe4e49a79",
+      "version": "0.1.0~preview1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "linux-headers-6.18.62-desos",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "ca49d1e0da0ff1b58077f13ef75380f411061261522a956af8fc11cf15f6489f",
+      "version": "6.18.62-1desos1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "linux-image-6.18.62-desos",
+      "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
+      "sha256": "8411c4900535a0ce2981a7f9e8b44e2b5f428f9add689d48b84f422a4a490c01",
+      "version": "6.18.62-1desos1"
+    }
+  ],
+  "schema": "desos-package-ledger-v1"
+}

@@ -51,6 +51,13 @@ chroot "$root" apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recomm
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${packages[@]}"
 mkdir -p "$root/tmp/desos-packages"
 cp "$inputs"/desktop/*.deb "$inputs"/release/*.deb "$root/tmp/desos-packages/"
+# Components delivered as DesOS packages (desos-verify) are not copied in from
+# their rootfs/ trees; the package must be among the release inputs.
+packaged_components=$(python3 "$here/components.py" packaged --recipes "$recipes")
+for name in $packaged_components; do
+    compgen -G "$root/tmp/desos-packages/${name}_*.deb" > /dev/null || {
+        echo "Missing input package $name in $inputs/release" >&2; exit 2; }
+done
 debs=()
 for archive in "$root"/tmp/desos-packages/*.deb; do
     [[ -f $archive ]] || { echo 'Missing component package archives' >&2; exit 2; }

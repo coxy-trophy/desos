@@ -7,9 +7,31 @@ is never used. This supplies development provenance, not production key policy.
 
 Example (operator supplies an existing development signing key):
   python3 image/component_repo.py --deb-input /abs/desktop-debs \\
-    --deb-input /abs/kernel-debs --deb-input /abs/desos-release.deb \\
+    --deb-input /abs/kernel-debs --deb-input /abs/kernel-meta \\
+    --deb-input /abs/desos-packages \\
+    --evidence /abs/kernel/kernel-provenance.json --evidence /abs/kernel/source-pin.json \\
+    --evidence /abs/kernel/signature-status.txt --evidence /abs/kernel/signature-log.txt \\
+    --evidence /abs/kernel/config-6.18.62-desos --evidence /abs/kernel/baseline.config \\
+    --evidence image/desktop-pin.json \\
     --output /abs/new-component-repo --gpg-home /abs/dedicated-gnupg \\
     --key-fingerprint FULL_PRIMARY_FINGERPRINT
+
+/abs/kernel-meta is the output of image/kernel_metapackage.py and
+/abs/desos-packages holds the desos-release and desos-verify packages.
+
+Besides the APT indexes the signed manifest.json records, for every package,
+the SHA-256 of a per-file list (file-lists/NAME_VERSION_ARCH.sha256, in
+sha256sum format relative to /), so an installed file can be checked without
+unpacking a .deb. Each --evidence file is copied to build-evidence/ beside a
+SHA256SUMS that is signed here (SHA256SUMS.asc) and whose hash is in the
+manifest; the image build installs exactly those bytes, so the image worker
+never needs the private key.
+
+Same version, different bytes: image/package-ledger.json (under version
+control) records the SHA-256 first seen for every package name, version and
+architecture. A package whose bytes differ from its ledger entry is refused;
+new identities are appended after a successful build unless
+--ledger-check-only is given. Commit the ledger with the build.
 
 Then independently verify using the explicitly selected home:
   gpg --no-options --homedir /abs/dedicated-gnupg --batch \\
@@ -37,6 +59,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 
 class RepoError(Exception):
@@ -64,6 +88,87 @@ def run(command, cwd=None):
 def gpg_run(home, arguments):
     return run(['gpg','--no-options','--homedir',str(home),'--batch','--no-tty',
                 '--pinentry-mode','error']+arguments)
+
+LEDGER = Path(__file__).resolve().parent/'package-ledger.json'
+LEDGER_SCHEMA = 'desos-package-ledger-v1'
+EVIDENCE_DIRECTORY = 'build-evidence'
+FILE_LIST_DIRECTORY = 'file-lists'
+EVIDENCE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._+-]*')
+
+def file_list(deb):
+    """sha256sum-format text over every regular file in a .deb payload, and its
+    entry count. Paths are relative to /; hard links carry their target's hash."""
+    process=subprocess.Popen(['dpkg-deb','--fsys-tarfile',str(deb)],stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                             env=dict(os.environ,LC_ALL='C',TZ='UTC'))
+    entries={}
+    try:
+        with tarfile.open(fileobj=process.stdout,mode='r|') as archive:
+            for member in archive:
+                name='/'.join(part for part in member.name.split('/') if part not in ('','.'))
+                if not name or not (member.isreg() or member.islnk()): continue
+                require('..' not in name.split('/') and '\n' not in name and '\\' not in name
+                        and name==name.strip(),'package payload path cannot be listed safely: %r'%name)
+                if member.isreg():
+                    value=hashlib.sha256()
+                    stream=archive.extractfile(member)
+                    for block in iter(lambda:stream.read(1024*1024),b''): value.update(block)
+                    entries[name]=value.hexdigest()
+                else:
+                    target='/'.join(part for part in member.linkname.split('/') if part not in ('','.'))
+                    require(target in entries,'hard link precedes its target in package payload: '+name)
+                    entries[name]=entries[target]
+    except tarfile.TarError as error:
+        raise RepoError('unreadable package payload: %s'%error)
+    finally:
+        process.stdout.close(); code=process.wait()
+    require(code==0,'dpkg-deb could not read %s'%Path(deb).name)
+    return ''.join('%s  %s\n'%(entries[name],name) for name in sorted(entries)),len(entries)
+
+def load_ledger(path):
+    """{(package, version, architecture): sha256} from the version-controlled ledger."""
+    path=Path(path)
+    require(not path.is_symlink() and path.is_file(),'package ledger must be an existing regular file: '+str(path))
+    try: data=json.loads(path.read_text(encoding='utf-8'))
+    except (UnicodeDecodeError,json.JSONDecodeError) as error: raise RepoError('package ledger is not valid JSON: %s'%error)
+    require(isinstance(data,dict) and data.get('schema')==LEDGER_SCHEMA and isinstance(data.get('packages'),list),
+            'package ledger has an unexpected format')
+    known={}
+    for entry in data['packages']:
+        require(isinstance(entry,dict) and all(isinstance(entry.get(k),str) for k in ('package','version','architecture','sha256'))
+                and re.fullmatch(r'[0-9a-f]{64}',entry['sha256']) is not None,'package ledger holds a malformed entry')
+        identity=(entry['package'],entry['version'],entry['architecture'])
+        require(identity not in known,'package ledger lists %s %s %s twice'%identity)
+        known[identity]=entry['sha256']
+    return known
+
+def record_ledger(path, additions, recorded):
+    """Append new identities; the file is replaced atomically and stays sorted."""
+    path=Path(path); data=json.loads(path.read_text(encoding='utf-8'))
+    data['packages']+=[{'package':p,'version':v,'architecture':a,'sha256':digest,'recorded':recorded}
+                       for (p,v,a),digest in sorted(additions.items())]
+    data['packages'].sort(key=lambda e:(e['package'],e['version'],e['architecture']))
+    descriptor,temporary=tempfile.mkstemp(prefix='.'+path.name+'.',dir=path.parent)
+    try:
+        with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
+            stream.write(json.dumps(data,indent=2,sort_keys=True)+'\n')
+        os.chmod(temporary,0o644); os.replace(temporary,path)
+    except BaseException:
+        try: os.unlink(temporary)
+        except OSError: pass
+        raise
+
+def collect_evidence(evidence):
+    """Explicit regular files with distinct safe names; nothing is searched for."""
+    files={}
+    for value in evidence or []:
+        path=Path(value).absolute()
+        require(not path.is_symlink() and path.is_file(),'evidence must be a regular file: '+str(path))
+        require(EVIDENCE_NAME.fullmatch(path.name) is not None and not path.name.startswith('SHA256SUMS'),
+                'evidence file name is not acceptable: '+path.name)
+        require(path.name not in files,'two evidence files are both named '+path.name)
+        files[path.name]=path.resolve(strict=True)
+    return files
 
 def collect_inputs(inputs):
     require(bool(inputs),'at least one explicit .deb input is required')
@@ -115,11 +220,11 @@ def sign(home, fingerprint, source, destination, clear=False):
     require(destination.is_file() and destination.stat().st_size>0,'signer produced no signature')
     verify_signature(home,fingerprint,destination,None if clear else source)
 
-def make_release(index_paths, directory, epoch):
+def make_release(index_paths, directory, epoch, description='DesOS offline development components'):
     date=format_datetime(datetime.fromtimestamp(epoch,timezone.utc),usegmt=True)
     lines=['Origin: DesOS','Label: DesOS','Suite: desos','Codename: desos',
            'Date: '+date,'Architectures: amd64','Components: main',
-           'Description: DesOS offline development components']
+           'Description: '+description]
     for algorithm,label in [('sha256','SHA256'),('sha512','SHA512')]:
         lines.append(label+':')
         for path in index_paths:
@@ -127,8 +232,13 @@ def make_release(index_paths, directory, epoch):
             lines.append(' %s %16d %s' % (digest,path.stat().st_size,path.relative_to(directory).as_posix()))
     return '\n'.join(lines)+'\n'
 
-def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
+def build_repository(inputs, output, gpg_home, fingerprint, epoch=None, evidence=None, ledger=None,
+                     record_ledger_entries=True, description=None, extra=None):
     files=collect_inputs(inputs)
+    evidence_files=collect_evidence(evidence)
+    known=load_ledger(ledger) if ledger is not None else None
+    require(extra is None or (isinstance(extra,dict) and not set(extra)&{'schema','packages','artifacts','signing_fingerprint','build_evidence'}),
+            'extra manifest fields may not replace repository fields')
     home,fingerprint=validate_home(gpg_home,fingerprint)
     require(shutil.which('dpkg-deb') is not None,'dpkg-deb is required')
     tool='apt-ftparchive' if shutil.which('apt-ftparchive') else 'dpkg-scanpackages'
@@ -159,7 +269,7 @@ def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
             require(len(fields)>9,'malformed GPG fingerprint response')
             primary.append(fields[9]); pending=False
     require(primary==[fingerprint],'exact primary secret signing key not found in dedicated home')
-    packages=[]; identities={}
+    packages=[]; identities={}; additions={}; lists=[]
     for source in files:
         metadata=package_metadata(source)
         digest=sha256(source)
@@ -168,6 +278,13 @@ def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
             require(identities[identity]==digest,'conflicting bytes for the same package/version/architecture')
             continue
         identities[identity]=digest
+        # Same name and version with other bytes than first recorded is refused:
+        # apt, dpkg and desos-verify all assume a version names one archive.
+        if known is not None:
+            require(known.get(identity,digest)==digest,
+                    'package ledger records %s %s (%s) with SHA-256 %s, but %s has %s; a version may never be '
+                    'reused for different bytes: raise the package version'%(identity+(known.get(identity),source.name,digest)))
+            if identity not in known: additions[identity]=digest
         package=metadata['package']
         pool=Path('pool/main')/package[0]/package/('%s_%s_%s.deb'%identity)
         destination=output/pool; destination.parent.mkdir(parents=True,exist_ok=True)
@@ -175,8 +292,13 @@ def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
         shutil.copyfile(source,destination)
         require(sha256(destination)==digest and sha256(source)==digest,'package input changed during copy')
         destination.chmod(0o644)
+        listing,count=file_list(destination)
+        list_path=output/FILE_LIST_DIRECTORY/('%s_%s_%s.sha256'%identity)
+        list_path.parent.mkdir(exist_ok=True); list_path.write_text(listing); lists.append(list_path)
         packages.append(dict(metadata,source_name=source.name,pool_path=pool.as_posix(),
-                             size_bytes=destination.stat().st_size,sha256=digest))
+                             size_bytes=destination.stat().st_size,sha256=digest,
+                             file_list={'path':list_path.relative_to(output).as_posix(),'entries':count,
+                                        'sha256':sha256(list_path),'size_bytes':list_path.stat().st_size}))
     index=output/'dists/desos/main/binary-amd64/Packages'; index.parent.mkdir(parents=True)
     if tool=='apt-ftparchive':
         text=run([tool,'packages','pool'],cwd=output)
@@ -187,7 +309,8 @@ def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
     compressed=index.with_name('Packages.gz')
     compressed.write_bytes(gzip.compress(text.encode(),mtime=0))
     release=index.parents[2]/'Release'
-    release.write_text(make_release([index,compressed],release.parent,timestamp))
+    release.write_text(make_release([index,compressed],release.parent,timestamp,
+                                    *([description] if description else [])))
     release_sig=release.with_name('Release.gpg'); inrelease=release.with_name('InRelease')
     sign(home,fingerprint,release,release_sig)
     sign(home,fingerprint,release,inrelease,clear=True)
@@ -195,19 +318,42 @@ def build_repository(inputs, output, gpg_home, fingerprint, epoch=None):
     exported=gpg_run(home,['--armor','--export-options','export-minimal','--export',fingerprint])
     require(exported.startswith('-----BEGIN PGP PUBLIC KEY BLOCK-----'),'public key export failed')
     public_key.write_text(exported)
-    artifacts=[index,compressed,release,release_sig,inrelease,public_key]
+    artifacts=[index,compressed,release,release_sig,inrelease,public_key]+lists
+    build_evidence=None
+    if evidence_files:
+        # Signed here, on the machine that holds the key; the image worker only
+        # copies and verifies these bytes.
+        directory=output/EVIDENCE_DIRECTORY; directory.mkdir()
+        recorded={}
+        for name,source in sorted(evidence_files.items()):
+            shutil.copyfile(source,directory/name); (directory/name).chmod(0o644)
+            recorded[name]={'sha256':sha256(directory/name),'size_bytes':(directory/name).stat().st_size}
+            require(sha256(source)==recorded[name]['sha256'],'evidence file changed during copy: '+name)
+        sums=directory/'SHA256SUMS'
+        sums.write_text(''.join('%s  %s\n'%(recorded[name]['sha256'],name) for name in sorted(recorded)))
+        sign(home,fingerprint,sums,directory/'SHA256SUMS.asc')
+        artifacts+=[sums,directory/'SHA256SUMS.asc']
+        build_evidence={'directory':EVIDENCE_DIRECTORY,'sha256sums_sha256':sha256(sums),'files':recorded}
     manifest={'schema':'desos-component-repository-v1','origin':'DesOS','suite':'desos',
               'component':'main','architectures':['amd64'],'source_date_epoch':timestamp,
               'signing_fingerprint':fingerprint,'signature_scope':'development provenance; not production key management',
               'metadata_tool':tool,'packages':packages,
               'artifacts':{p.relative_to(output).as_posix():{'sha256':sha256(p),'size_bytes':p.stat().st_size} for p in artifacts},
               'signature_verification':{'release':True,'inrelease':True}}
+    if build_evidence: manifest['build_evidence']=build_evidence
+    if extra: manifest.update(extra)
     manifest_path=output/'manifest.json'
     manifest_path.write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
     sign(home,fingerprint,manifest_path,output/'manifest.json.asc')
+    if known is not None and additions and record_ledger_entries:
+        record_ledger(ledger,additions,'repository build '+datetime.fromtimestamp(timestamp,timezone.utc).strftime('%Y-%m-%d'))
     incomplete.unlink()
-    return {'status':'built','output':str(output),'package_count':len(packages),
+    result={'status':'built','output':str(output),'package_count':len(packages),
             'signing_fingerprint':fingerprint,'manifest':str(manifest_path)}
+    if known is not None:
+        result['ledger']={'path':str(ledger),'new_identities':['%s %s %s'%identity for identity in sorted(additions)],
+                          'recorded':bool(additions) and record_ledger_entries}
+    return result
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -216,9 +362,13 @@ def main(argv=None):
     parser.add_argument('--gpg-home',required=True,help='dedicated existing GPG homedir, mode0700, owned by current user')
     parser.add_argument('--key-fingerprint',required=True,help='full primary signing key fingerprint; exact key forced')
     parser.add_argument('--source-date-epoch',type=int,help='optional explicit Release timestamp')
+    parser.add_argument('--evidence',action='append',help='build evidence file to ship signed under build-evidence/; repeatable')
+    parser.add_argument('--ledger',default=str(LEDGER),help='package ledger (default: image/package-ledger.json)')
+    parser.add_argument('--ledger-check-only',action='store_true',help='check against the ledger but do not record new packages')
     args=parser.parse_args(argv)
     try:
-        result=build_repository(args.deb_input,args.output,args.gpg_home,args.key_fingerprint,args.source_date_epoch)
+        result=build_repository(args.deb_input,args.output,args.gpg_home,args.key_fingerprint,args.source_date_epoch,
+                                evidence=args.evidence,ledger=args.ledger,record_ledger_entries=not args.ledger_check_only)
         print(json.dumps(result,sort_keys=True)); return 0
     except (RepoError,OSError,ValueError,KeyError,TypeError) as error:
         print(json.dumps({'status':'failed','error':str(error),'output':str(Path(args.output).absolute())})); return 1

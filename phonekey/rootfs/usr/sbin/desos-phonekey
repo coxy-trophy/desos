@@ -37,6 +37,9 @@ P256_SPKI = bytes.fromhex('3059301306072a8648ce3d020106082a8648ce3d0301070342000
 SPKI_LEN = 91
 MAX_ACTION = 512
 OPENSSL = '/usr/bin/openssl'
+LOGINCTL = '/usr/bin/loginctl'
+SESSION_SCOPE = re.compile(r'session-([A-Za-z0-9_]{1,64})\.scope')
+LOCAL_HOSTS = ('', 'localhost', '127.0.0.1', '::1')
 SELF = '/usr/sbin/desos-phonekey'
 # PAM services this tool will touch, and the capability each belongs to.
 SERVICES = {'sudo': 'sudo', 'sudo-i': 'sudo', 'polkit-1': 'polkit-1'}
@@ -392,12 +395,60 @@ def describe(service, user, parent=None, proc='/proc'):
     return text if valid_action(text) else f'sudo as {user} (the command could not be shown)'
 
 
+# --- where the request comes from -------------------------------------------
+
+def session_properties(session_id):
+    """What logind says about one login session, as {property: value}."""
+    done = subprocess.run([LOGINCTL, 'show-session', session_id, '--property=Remote', '--property=Seat',
+                           '--property=Class', '--property=Type', '--property=Service'],
+                          capture_output=True, timeout=5, cwd='/', env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+    if done.returncode != 0:
+        raise Refused('loginctl could not describe the session')
+    return dict(line.split('=', 1) for line in done.stdout.decode('utf-8', 'replace').splitlines() if '=' in line)
+
+
+def locality(env, proc='/proc', session=session_properties):
+    """(True, detail) only with positive evidence that the request was made in a
+    local login session on a seat; (False, reason) for a remote one and whenever
+    that cannot be established.
+
+    The session is taken from this process's own cgroup, which the kernel and
+    systemd maintain and the user cannot rewrite: pam_exec forked us from the
+    process that called PAM, so we are in its session scope. Environment
+    variables of the caller (XDG_SESSION_ID, SSH_CONNECTION) are not consulted:
+    whoever is asking controls them."""
+    host = env.get('PAM_RHOST', '').strip()
+    if host.lower() not in LOCAL_HOSTS and host != socket.gethostname():
+        return False, 'remote_session: PAM names the remote host ' + clean(host)[:64]
+    try:
+        with open(f'{proc}/self/cgroup', 'rb') as handle:
+            lines = handle.read(8192).decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return False, 'locality_unknown: the control group of the request is unreadable'
+    # cgroup v2 has one "0::/path" line; with the hybrid layout the name=systemd line carries the same path.
+    paths = [line.split(':', 2)[2] for line in lines if line.count(':') >= 2 and line.split(':', 2)[1] in ('', 'name=systemd')]
+    scopes = {match.group(1) for path in paths for part in path.split('/') for match in [SESSION_SCOPE.fullmatch(part)] if match}
+    if len(scopes) != 1:
+        return False, 'locality_unknown: the request was not made inside a login session scope'
+    session_id = scopes.pop()
+    try:
+        found = session(session_id)
+    except (OSError, subprocess.SubprocessError, Refused, ValueError) as error:
+        return False, 'locality_unknown: logind did not answer for session %s (%s)' % (session_id, clean(str(error))[:80])
+    remote, seat = found.get('Remote'), found.get('Seat', '')
+    if remote == 'yes' or found.get('Service') in ('sshd', 'ssh'):
+        return False, 'remote_session: session %s is a remote login' % session_id
+    if remote != 'no' or not seat or found.get('Class') != 'user':
+        return False, 'locality_unknown: session %s is not a user session on a local seat' % session_id
+    return True, 'session %s on %s' % (session_id, clean(seat)[:32])
+
+
 # --- the PAM helper ---------------------------------------------------------
 
-def pam_auth(paths, env, send=transport, out=None, clock=time.time, parent=None, proc='/proc'):
+def pam_auth(paths, env, send=transport, out=None, clock=time.time, parent=None, proc='/proc', session=session_properties):
     """0 only when the enrolled phone signed this request. Never raises."""
     try:
-        return _pam_auth(paths, env, send, out or sys.stdout, clock, parent, proc)
+        return _pam_auth(paths, env, send, out or sys.stdout, clock, parent, proc, session)
     except BaseException as error:  # any failure at all is "use the password"
         try:
             audit(paths, {'event': 'error', 'error': type(error).__name__, 'detail': str(error)[:200]})
@@ -406,7 +457,7 @@ def pam_auth(paths, env, send=transport, out=None, clock=time.time, parent=None,
         return 1
 
 
-def _pam_auth(paths, env, send, out, clock, parent, proc):
+def _pam_auth(paths, env, send, out, clock, parent, proc, session):
     service, user = env.get('PAM_SERVICE', ''), env.get('PAM_USER', '')
     if env.get('PAM_TYPE') != 'auth' or service not in SERVICES or not USER.fullmatch(user):
         return 1
@@ -424,6 +475,17 @@ def _pam_auth(paths, env, send, out, clock, parent, proc):
     state = load_state(paths, user)
     state['recent'] = [at for at in state['recent'] if 0 <= now - at < 600]
     base = {'user': user, 'service': service, 'device': record['device_id']}
+    # Phone approval is for someone sitting at this machine. A request from a
+    # remote login (ssh), or one whose origin cannot be established, is declined
+    # before the phone is asked; the password prompt follows as usual.
+    local, where = locality(env, proc, session)
+    if not local:
+        reason, _, detail = where.partition(': ')
+        audit(paths, dict(base, event='skipped', reason=reason, detail=detail, tty=clean(env.get('PAM_TTY', ''))[:64],
+                          rhost=clean(env.get('PAM_RHOST', ''))[:64]))
+        print('Phone approval is only offered in a local session; use your password.', file=out, flush=True)
+        return 1
+    base['tty'] = clean(env.get('PAM_TTY', ''))[:64]
     for name, why in (('locked_until', 'locked_out'), ('cooldown_until', 'cooling_down')):
         if now < state[name]:
             audit(paths, dict(base, event='skipped', reason=why))
@@ -782,7 +844,7 @@ def main(argv=None, out=None):
             os.umask(0o077)
         except OSError:
             return 1
-        return pam_auth(Paths(), {name: os.environ.get(name, '') for name in ('PAM_TYPE', 'PAM_SERVICE', 'PAM_USER')})
+        return pam_auth(Paths(), {name: os.environ.get(name, '') for name in ('PAM_TYPE', 'PAM_SERVICE', 'PAM_USER', 'PAM_RHOST', 'PAM_TTY')})
     parser = argparse.ArgumentParser(prog='desos-phonekey', description='Let a paired phone approve administrator actions (off by default).')
     parser.add_argument('--root', default='/', help='operate on an image tree instead of the running system')
     commands = parser.add_subparsers(dest='command', required=True)

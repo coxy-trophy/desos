@@ -159,3 +159,33 @@ upstream fingerprint only. It does not recursively enumerate the worker or copy
 signing material. The image builder should authenticate its local repository
 metadata separately and consume the image/headers packages by exact version.
 The script does not run `dpkg -i`, initramfs generation or GRUB configuration.
+
+## Metapackages and kernel upgrades
+
+The packages above are named by version, so apt never replaces one with a
+newer one. `image/kernel_metapackage.py` builds `linux-image-desos` and
+`linux-headers-desos` (no root, deterministic, a JSON record beside each
+`.deb`), versioned like the kernel package and depending on exactly
+`linux-image-<version>-desos (= <package_version>)` from `source-pin.json`.
+The image installs the kernel through them. After a repin and rebuild, the
+new metapackages published in the DesOS origin make `apt upgrade` install the
+new kernel beside the old one; the GRUB hook
+`/usr/lib/desos/select-upstream-kernel` (kernel `postinst.d`/`postrm.d`) then
+saves the newest `-desos` kernel by version order as the default. That
+selection is tested against a fixture `/boot` with two and three DesOS
+kernels; a real upgrade has not been run.
+
+**What removes old kernels.** Nothing in DesOS, and nothing needs adding: the
+versioned package becomes an automatically installed dependency that nothing
+depends on, so `apt autoremove` and unattended-upgrades
+(`Remove-Unused-Kernel-Packages`, on by default) remove it. apt protects the
+running kernel and, as far as its documented rule goes, the two
+highest-versioned installed `linux-image-*` packages of any flavour. Ubuntu's
+7.x compatibility kernels outrank 6.18.x, so a superseded DesOS kernel is kept
+only while it is the one running: after rebooting into the new kernel the old
+one goes at the next autoremove, and the fallback is the Ubuntu compatibility
+kernel, not the previous DesOS kernel. Whether to pin one previous DesOS
+kernel is an open policy choice; this behaviour is read from apt's
+configuration, not observed on a DesOS system. The 0.1 image installed the
+versioned packages by name (manually installed), so on such a system they are
+never removed automatically.

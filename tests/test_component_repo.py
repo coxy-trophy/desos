@@ -57,14 +57,133 @@ class ComponentRepoTests(unittest.TestCase):
             return '[GNUPG:] SIG_CREATED D 1 10 00 0 '+FINGERPRINT+'\n'
         self.fail('unexpected GPG operation: '+str(command))
 
-    def build(self, inputs, output=None):
+    def build(self, inputs, output=None, **options):
         output=output or self.root/'repository'
         real_run=repo.run
         def runner(command, **kwargs):
             if command[0]=='gpg': return self.fake_gpg(command,**kwargs)
             return real_run(command,**kwargs)
         with patch.object(repo,'run',side_effect=runner):
-            return repo.build_repository(inputs,output,self.home,FINGERPRINT,epoch=1794268800)
+            return repo.build_repository(inputs,output,self.home,FINGERPRINT,epoch=1794268800,**options)
+
+    def ledger(self, entries=()):
+        path=self.root/'ledger.json'
+        path.write_text(json.dumps({'schema':'desos-package-ledger-v1','packages':list(entries)}))
+        return path
+
+    def rebuilt(self, name='desos-desktop'):
+        """The same package name and version again, with other content."""
+        first=self.deb(name); kept=self.root/'first.deb'; shutil.copyfile(first,kept)
+        (self.root/(name+'-tree')/'usr/share'/name/'fixture').write_text('different package bytes\n')
+        subprocess.run(['dpkg-deb','--build','--root-owner-group',str(self.root/(name+'-tree')),str(first)],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        return kept,first
+
+    def test_manifest_carries_a_signed_list_of_every_packaged_file(self):
+        package=self.deb()
+        tree=self.root/'desos-desktop-tree'
+        (tree/'usr/bin').mkdir(); (tree/'usr/bin/tool').write_text('#!/bin/sh\n'); (tree/'usr/bin/tool').chmod(0o755)
+        os.symlink('tool',tree/'usr/bin/alias'); os.link(tree/'usr/bin/tool',tree/'usr/bin/hard')
+        subprocess.run(['dpkg-deb','--build','--root-owner-group',str(tree),str(package)],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.build([package]); output=self.root/'repository'
+        manifest=json.loads((output/'manifest.json').read_text())
+        listing=manifest['packages'][0]['file_list']
+        self.assertEqual(listing['path'],'file-lists/desos-desktop_0.1_amd64.sha256')
+        text=(output/listing['path']).read_text()
+        self.assertEqual(hashlib.sha256(text.encode()).hexdigest(),listing['sha256'])
+        # Covered twice: by the package entry and as a repository artifact.
+        self.assertEqual(manifest['artifacts'][listing['path']]['sha256'],listing['sha256'])
+        tool=hashlib.sha256(b'#!/bin/sh\n').hexdigest()
+        self.assertEqual(text.splitlines(),[
+            tool+'  usr/bin/hard', tool+'  usr/bin/tool',
+            hashlib.sha256(b'temporary test package\n').hexdigest()+'  usr/share/desos-desktop/fixture'])
+        self.assertEqual(listing['entries'],3)
+        # sha256sum itself accepts the format against an unpacked tree.
+        unpacked=self.root/'unpacked'
+        subprocess.run(['dpkg-deb','-x',str(package),str(unpacked)],check=True)
+        subprocess.run(['sha256sum','--check','--strict','--quiet',str(output/listing['path'])],cwd=unpacked,check=True)
+
+    def test_build_evidence_is_copied_and_covered_by_a_signature_made_here(self):
+        package=self.deb(); source=self.root/'evidence'; source.mkdir()
+        (source/'kernel-provenance.json').write_text('{"kernel_release": "x"}\n'); (source/'config-6.18.62-desos').write_text('CONFIG=y\n')
+        self.build([package],evidence=sorted(source.iterdir())); output=self.root/'repository'
+        directory=output/'build-evidence'
+        self.assertEqual(sorted(p.name for p in directory.iterdir()),['SHA256SUMS','SHA256SUMS.asc','config-6.18.62-desos','kernel-provenance.json'])
+        sums=(directory/'SHA256SUMS').read_text()
+        self.assertEqual(sums,''.join('%s  %s\n'%(hashlib.sha256((source/name).read_bytes()).hexdigest(),name)
+                                      for name in ('config-6.18.62-desos','kernel-provenance.json')))
+        manifest=json.loads((output/'manifest.json').read_text())
+        self.assertEqual(manifest['build_evidence']['sha256sums_sha256'],hashlib.sha256(sums.encode()).hexdigest())
+        self.assertEqual(sorted(manifest['build_evidence']['files']),['config-6.18.62-desos','kernel-provenance.json'])
+        self.assertIn('build-evidence/SHA256SUMS.asc',manifest['artifacts'])
+        signing=[c for c in self.commands if '--detach-sign' in c and c[-1].endswith('SHA256SUMS')]
+        self.assertEqual(len(signing),1); self.assertIn(FINGERPRINT+'!',signing[0])
+        # Without evidence the manifest says nothing about it.
+        self.build([package],self.root/'plain')
+        self.assertNotIn('build_evidence',json.loads((self.root/'plain/manifest.json').read_text()))
+        self.assertFalse((self.root/'plain/build-evidence').exists())
+
+    def test_unsuitable_evidence_is_refused_before_anything_is_written(self):
+        package=self.deb(); good=self.root/'note.txt'; good.write_text('x')
+        link=self.root/'link.txt'; link.symlink_to(good)
+        other=self.root/'other'; other.mkdir(); (other/'note.txt').write_text('y')
+        (self.root/'SHA256SUMS').write_text('x'); (self.root/'bad name').write_text('x')
+        for evidence in ([link],[self.root/'absent'],[self.root],[good,other/'note.txt'],[self.root/'SHA256SUMS'],[self.root/'bad name']):
+            with self.subTest(evidence=evidence),self.assertRaises(repo.RepoError): self.build([package],evidence=evidence)
+        self.assertFalse((self.root/'repository').exists())
+
+    def test_ledger_refuses_a_recorded_version_with_other_bytes(self):
+        kept,changed=self.rebuilt()
+        ledger=self.ledger()
+        result=self.build([kept],ledger=ledger)
+        self.assertEqual(result['ledger'],{'path':str(ledger),'new_identities':['desos-desktop 0.1 amd64'],'recorded':True})
+        entries=json.loads(ledger.read_text())['packages']
+        self.assertEqual([(e['package'],e['version'],e['architecture'],e['sha256']) for e in entries],
+                         [('desos-desktop','0.1','amd64',repo.sha256(kept))])
+        self.assertEqual(entries[0]['recorded'],'repository build 2026-11-10')
+        before=ledger.read_bytes()
+        # The same bytes again are fine and change nothing.
+        self.assertEqual(self.build([kept],self.root/'again',ledger=ledger)['ledger']['new_identities'],[])
+        self.assertEqual(ledger.read_bytes(),before)
+        with self.assertRaises(repo.RepoError) as refused: self.build([changed],self.root/'reused',ledger=ledger)
+        self.assertIn('never be reused for different bytes',str(refused.exception))
+        self.assertTrue((self.root/'reused/.incomplete').exists())
+        self.assertFalse((self.root/'reused/manifest.json').exists())
+        self.assertEqual(ledger.read_bytes(),before)
+
+    def test_ledger_can_be_checked_without_recording_and_must_be_well_formed(self):
+        package=self.deb(); ledger=self.ledger(); before=ledger.read_bytes()
+        result=self.build([package],ledger=ledger,record_ledger_entries=False)
+        self.assertEqual((result['ledger']['new_identities'],result['ledger']['recorded']),(['desos-desktop 0.1 amd64'],False))
+        self.assertEqual(ledger.read_bytes(),before)
+        entry={'package':'p','version':'1','architecture':'all','sha256':'a'*64}
+        for index,text in enumerate(['not json','{"schema": "other", "packages": []}',json.dumps({'schema':'desos-package-ledger-v1','packages':[entry,entry]}),
+                     json.dumps({'schema':'desos-package-ledger-v1','packages':[dict(entry,sha256='short')]})]):
+            ledger.write_text(text)
+            with self.subTest(text=text),self.assertRaises(repo.RepoError): self.build([package],self.root/('bad-%d'%index),ledger=ledger)
+            self.assertFalse((self.root/('bad-%d'%index)).exists())
+        with self.assertRaises(repo.RepoError): self.build([package],self.root/'missing',ledger=self.root/'no-ledger.json')
+
+    def test_shipped_ledger_holds_the_first_image_and_the_command_line_uses_it(self):
+        known=repo.load_ledger(repo.LEDGER)
+        self.assertEqual(repo.LEDGER,PATH.parent/'package-ledger.json')
+        # What went out in the 0.1 image is on record, including the identity package whose content later changed.
+        self.assertIn(('desos-release','0.1.0~preview1','all'),known)
+        self.assertIn(('des-ui','0.1.1','amd64'),known)
+        self.assertIn(('linux-image-6.18.62-desos','6.18.62-1desos1','amd64'),known)
+        pin=json.loads((PATH.parent/'desktop-pin.json').read_text())
+        for item in pin['packages']:
+            name,version,arch=item['file'][:-4].split('_')
+            self.assertEqual(known[(name,version,arch)],item['sha256'])
+        # A different des-ui 0.1.1 (the one in the public des-ui apt repository) cannot be assembled into a DesOS repository.
+        other=self.deb('des-ui','0.1.1','amd64'); before=repo.LEDGER.read_bytes()
+        real_run=repo.run
+        def runner(command, **kwargs):
+            return self.fake_gpg(command,**kwargs) if command[0]=='gpg' else real_run(command,**kwargs)
+        with patch.object(repo,'run',side_effect=runner),redirect_stdout(io.StringIO()) as captured:
+            code=repo.main(['--deb-input',str(other),'--output',str(self.root/'cli'),'--gpg-home',str(self.home),'--key-fingerprint',FINGERPRINT])
+        self.assertEqual(code,1)
+        self.assertIn('des-ui 0.1.1',json.loads(captured.getvalue())['error'])
+        self.assertEqual(repo.LEDGER.read_bytes(),before,'a test must never write the real ledger')
 
     def test_real_debs_form_apt_repository_and_signed_provenance_contract(self):
         if not (shutil.which('apt-ftparchive') or shutil.which('dpkg-scanpackages')):
