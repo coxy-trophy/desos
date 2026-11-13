@@ -321,8 +321,14 @@ class StylesheetTests(unittest.TestCase):
     def test_automatic_login_stays_unavailable(self):
         block = {name: value for selector, declarations in self.sheet.rules
                  if selector == "QCheckBox#checkBoxDoAutoLogin" for name, value in declarations.items()}
-        self.assertEqual(block["qproperty-enabled"], "false")
-        self.assertIn("unavailable", block["qproperty-text"])
+        # The users module rewrites this checkbox's text and state after
+        # styling, so it is collapsed and taken out of the Tab order.
+        self.assertEqual(block["qproperty-focusPolicy"], "NoFocus")
+        self.assertEqual(block["max-height"], "0px")
+        self.assertEqual(block["color"], "transparent")
+        indicator = {name: value for selector, declarations in self.sheet.rules
+                     if selector == "QCheckBox#checkBoxDoAutoLogin::indicator" for name, value in declarations.items()}
+        self.assertEqual((indicator["width"], indicator["height"]), ("0px", "0px"))
         # Nothing else rewrites Calamares's translated wording or state.
         others = [(selector, name) for selector, declarations in self.sheet.rules for name in declarations
                   if name.startswith("qproperty-") and selector != "QCheckBox#checkBoxDoAutoLogin"]

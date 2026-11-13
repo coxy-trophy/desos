@@ -220,6 +220,25 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(execute.call_args.args[0:2], ("/usr/bin/calamares", ["calamares"]))
 
 
+class LocaleListTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load("desos_install_into_rootfs", BASE / "install_into_rootfs.py")
+
+    def test_ghana_formats_follow_the_chosen_language(self):
+        text = self.module.locale_list("ak_GH UTF-8\nen_US.UTF-8 UTF-8\nen_GB.UTF-8 UTF-8\nde_DE ISO-8859-1\nfr_FR.UTF-8 UTF-8\n")
+        entries = [line for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(entries, ["en_US.UTF-8 UTF-8", "en_GB.UTF-8 UTF-8", "fr_FR.UTF-8 UTF-8"])
+
+    def test_a_list_without_en_us_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.module.locale_list("fr_FR.UTF-8 UTF-8\n")
+
+    def test_locale_module_reads_the_generated_list(self):
+        config = yaml.safe_load((BASE / "calamares/modules/locale.conf").read_text())
+        self.assertEqual(config["localeGenPath"], "/" + self.module.LOCALE_LIST)
+        self.assertEqual((config["region"], config["zone"]), ("Africa", "Accra"))
+
+
 class ConfigurationTests(unittest.TestCase):
     def test_real_backend_modules_and_cleanup_run_before_initramfs_and_bootloader(self):
         settings = yaml.safe_load((BASE / "calamares/settings.conf").read_text())

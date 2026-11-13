@@ -257,23 +257,35 @@ QRadioButton::indicator {
     border-radius: 8px;
 }
 QRadioButton::indicator:hover { border-color: #dce7ec; }
+/* Same box in both states: Qt draws thick rounded borders unevenly, so the
+   checked dot is a radial gradient inside the ordinary 1px ring. */
 QRadioButton::indicator:checked {
-    width: 6px;
-    height: 6px;
-    background-color: #06080b;
-    border: 5px solid #4fd8ce;
-    border-radius: 8px;
+    border: 1px solid #4fd8ce;
+    background-color: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+        stop: 0 #4fd8ce, stop: 0.48 #4fd8ce, stop: 0.56 #0a0e12, stop: 1 #0a0e12);
 }
 QRadioButton::indicator:disabled { background-color: #06080b; border: 1px solid #5b7385; }
-QRadioButton::indicator:checked:disabled { border: 5px solid #5b7385; }
-
-/* greetd authentication is required in this preview. Keep the unavailable
-   upstream option visible and accessible, with an explicit explanation. */
-QCheckBox#checkBoxDoAutoLogin {
-    qproperty-enabled: false;
-    qproperty-text: "Automatic login (unavailable in this preview)";
-    qproperty-toolTip: "Sign in with your chosen password after installation.";
+QRadioButton::indicator:checked:disabled {
+    border: 1px solid #5b7385;
+    background-color: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+        stop: 0 #5b7385, stop: 0.48 #5b7385, stop: 0.56 #06080b, stop: 1 #06080b);
 }
+
+/* greetd requires the password on every installed system, and the users
+   module sets this checkbox's text and state itself after styling, so it
+   cannot be shown as disabled. Collapse it and keep it out of the Tab order
+   instead (seen enabled with stock wording in the 0.1 and v4 images). */
+QCheckBox#checkBoxDoAutoLogin {
+    qproperty-focusPolicy: NoFocus;
+    max-height: 0px;
+    min-height: 0px;
+    margin: 0px;
+    padding: 0px;
+    border: none;
+    font-size: 1px;
+    color: transparent;
+}
+QCheckBox#checkBoxDoAutoLogin::indicator { width: 0px; height: 0px; border: none; }
 
 /* ---- Lists, tables, trees --------------------------------------------- */
 
