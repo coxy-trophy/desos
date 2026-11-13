@@ -37,6 +37,20 @@
       "version": "0.1.0~preview1"
     },
     {
+      "architecture": "all",
+      "package": "desos-release",
+      "recorded": "repository build 2026-11-13",
+      "sha256": "82f0bd0f80f0d988c7dde3db094a73914467099fad37f9aeb985c8e730c3549a",
+      "version": "0.1.0~preview1+1"
+    },
+    {
+      "architecture": "all",
+      "package": "desos-verify",
+      "recorded": "repository build 2026-11-13",
+      "sha256": "f5e732f397100add16eb888a92cc697111ce8c601787c731c8bf50f59aa401e5",
+      "version": "2.0"
+    },
+    {
       "architecture": "amd64",
       "package": "linux-headers-6.18.62-desos",
       "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
@@ -45,9 +59,23 @@
     },
     {
       "architecture": "amd64",
+      "package": "linux-headers-desos",
+      "recorded": "repository build 2026-11-13",
+      "sha256": "0dac0c14f53152bf0e68a87de17efc8aefcfaf09b0fc6b915a5823f02d310463",
+      "version": "6.18.62-1desos1"
+    },
+    {
+      "architecture": "amd64",
       "package": "linux-image-6.18.62-desos",
       "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
       "sha256": "8411c4900535a0ce2981a7f9e8b44e2b5f428f9add689d48b84f422a4a490c01",
+      "version": "6.18.62-1desos1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "linux-image-desos",
+      "recorded": "repository build 2026-11-13",
+      "sha256": "73564a93aba54deba084c3338ff3484b81b7f13bd44c6b33c51f15926d8719d9",
       "version": "6.18.62-1desos1"
     }
   ],
