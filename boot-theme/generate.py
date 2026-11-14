@@ -24,6 +24,8 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 FONTS = HERE.parent / 'installer/fonts'
 THEME = HERE / 'rootfs/boot/grub/themes/desos'
+sys.path.insert(0, str(HERE.parent / 'branding'))
+import bird  # noqa: E402  the DesOS bird, read from branding/bird.svg
 
 # The DEs-UI matte instrument palette (des-ui/DESIGN.md, installer/DESIGN.md).
 GROUND = (0x06, 0x08, 0x0b)
@@ -308,18 +310,17 @@ def build_wordmark(out):
     face = ImageFont.truetype(str(FONTS / 'ChakraPetch-SemiBold.ttf'), 38)
     small = ImageFont.truetype(str(FONTS / 'JetBrainsMono.ttf'), 11)
     des, os_ = face.getlength('Des'), face.getlength('OS')
-    pad_x, height = 20, 60
-    width = round(pad_x * 2 + des + os_)
+    height, bird_height = 60, 50
+    mark = bird.mask(bird_height)
+    name_x = mark.width + 14
+    width = round(name_x + des + os_)
     image = Image.new('RGBA', (width + 190, height), (0, 0, 0, 0))
+    # The bird, then the name beside it, as in the DEs-UI lockup.
+    image.paste(Image.new('RGBA', mark.size, TEXT + (255,)), (0, (height - bird_height) // 2), mark)
     draw = ImageDraw.Draw(image)
     baseline = 43
-    draw.text((pad_x, baseline), 'Des', font=face, fill=TEXT + (255,), anchor='ls')
-    draw.text((pad_x + des, baseline), 'OS', font=face, fill=ACCENT + (255,), anchor='ls')
-    # The bracket: top-left and bottom-right corners, as on the installer's welcome card.
-    arm = 14
-    for box in ((0, 0, arm, 1), (0, 0, 1, arm), (width - arm - 1, height - 2, width - 1, height - 1),
-                (width - 2, height - arm - 1, width - 1, height - 1)):
-        draw.rectangle(box, fill=ACCENT + (255,))
+    draw.text((name_x, baseline), 'Des', font=face, fill=TEXT + (255,), anchor='ls')
+    draw.text((name_x + des, baseline), 'OS', font=face, fill=ACCENT + (255,), anchor='ls')
     x = width + 18
     draw.rectangle((x, 12, x, height - 13), fill=LINE + (255,))
     draw.text((x + 16, 27), 'DEs-UI DESKTOP', font=small, fill=SECONDARY + (255,), anchor='ls')
@@ -358,14 +359,17 @@ def build_icons(out):
 
         painter(line, rect, block, ring)
         image = image.resize((ICON, ICON), Image.LANCZOS)
+        if name == 'desos':
+            # DesOS itself: the bird, drawn from the master rather than in strokes.
+            mark = bird.mask(ICON - 2)
+            image = Image.new('RGBA', (ICON, ICON), (0, 0, 0, 0))
+            image.paste(Image.new('RGBA', mark.size, ink), ((ICON - mark.width) // 2, 1), mark)
         save(image, icons / f'{name}.png')
         for alias in ICON_ALIASES.get(name, []):
             shutil.copyfile(icons / f'{name}.png', icons / f'{alias}.png')
 
-    def desos(line, rect, block, ring):          # the bracket and a filled core
-        line([(3, 10), (3, 3), (10, 3)], accent)
-        line([(21, 14), (21, 21), (14, 21)], accent)
-        block(8, 8, 16, 16)
+    def desos(line, rect, block, ring):          # the bird, pasted in draw_icon
+        pass
 
     def install(line, rect, block, ring):        # arrow into a tray
         line([(4, 15), (4, 20), (20, 20), (20, 15)])

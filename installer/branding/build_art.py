@@ -13,6 +13,7 @@ Needs python3-fonttools and python3-cairo on the build host; not at install
 time. Run:  python3 installer/branding/build_art.py
 """
 import math
+import sys
 from pathlib import Path
 
 import cairo
@@ -23,6 +24,8 @@ from fontTools.ttLib import TTFont
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "desos"
 FONTS = HERE.parent / "fonts"
+sys.path.insert(0, str(HERE.parent.parent / "branding"))
+import bird  # noqa: E402  the DesOS bird, read from branding/bird.svg
 
 GROUND, PANEL, TRACK = "#06080b", "#0a0e12", "#141b22"
 LINE, LINE_STRONG, EDGE = "#1a232b", "#2a3742", "#5b7385"
@@ -107,6 +110,10 @@ class Drawing:
     def fill(self, segments, colour):
         self.ops.append(("fill", segments, colour, 0))
 
+    def fill_evenodd(self, segments, colour):
+        """A fill where overlapping contours cut each other out (the bird's eye)."""
+        self.ops.append(("fill-evenodd", segments, colour, 0))
+
     def stroke(self, segments, colour, width):
         self.ops.append(("stroke", segments, colour, width))
 
@@ -125,6 +132,8 @@ class Drawing:
         for kind, segments, colour, width in self.ops:
             if kind == "fill":
                 body.append(f'  <path fill="{colour}" d="{data(segments)}"/>')
+            elif kind == "fill-evenodd":
+                body.append(f'  <path fill="{colour}" fill-rule="evenodd" d="{data(segments)}"/>')
             else:
                 body.append(f'  <path fill="none" stroke="{colour}" stroke-width="{width:g}" d="{data(segments)}"/>')
         return (
@@ -148,7 +157,8 @@ class Drawing:
                 else:
                     ctx.close_path()
             ctx.set_source_rgb(*[int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)])
-            if kind == "fill":
+            if kind in ("fill", "fill-evenodd"):
+                ctx.set_fill_rule(cairo.FILL_RULE_EVEN_ODD if kind == "fill-evenodd" else cairo.FILL_RULE_WINDING)
                 ctx.fill()
             else:
                 ctx.set_line_width(width)
@@ -156,19 +166,25 @@ class Drawing:
         surface.write_to_png(str(path))
 
 
-def brackets(d, x, y, w, h, arm, colour, width=2):
-    d.stroke(polyline((x, y + arm), (x, y), (x + arm, y)), colour, width)
-    d.stroke(polyline((x + w - arm, y + h), (x + w, y + h), (x + w, y + h - arm)), colour, width)
+def bird_outline(x, y, height):
+    """The bird as drawing segments, its ink `height` tall, top-left at x, y."""
+    k = height / (bird.INK[3] - bird.INK[1])
+    segments = []
+    for op, v in bird.commands():
+        points = [(x + (v[i] - bird.INK[0]) * k, y + (v[i + 1] - bird.INK[1]) * k) for i in range(0, len(v), 2)]
+        segments.append((op, *[c for p in points for c in p]))
+    return segments
 
 
 def welcome(strings, display, body, mono):
     d = Drawing(720, 220, f"{strings['versionedName']}: nothing is written until you confirm")
     d.fill(rounded(0.5, 0.5, 719, 219, 10), PANEL)
     d.stroke(rounded(0.5, 0.5, 719, 219, 10), LINE_STRONG, 1)
-    brackets(d, 28, 28, 250, 164, 18, ACCENT)
-    start = 52
-    start += d.text(display, "Des", start, 112, 68, TEXT)
-    d.text(display, "OS", start, 112, 68, ACCENT)
+    # The bird beside the name, as in the DEs-UI lockup.
+    d.fill_evenodd(bird_outline(54, 58, 66), TEXT)
+    start = 54 + 66 * bird.aspect() + 12
+    start += d.text(display, "Des", start, 112, 54, TEXT)
+    d.text(display, "OS", start, 112, 54, ACCENT)
     d.text(mono, f"{strings['shortVersion']} PREVIEW  /  DEs-UI DESKTOP", 54, 142, 10.5, SECONDARY, tracking=1.2)
     d.text(body, "Built on Linux and Ubuntu 26.04", 54, 168, 13, SECONDARY)
     d.stroke(polyline((308.5, 30), (308.5, 190)), LINE_STRONG, 1)

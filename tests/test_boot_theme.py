@@ -128,6 +128,8 @@ class BootThemeTests(unittest.TestCase):
         self.assertEqual(sorted(settings), ['GRUB_FONT', 'GRUB_GFXMODE', 'GRUB_THEME'])
         self.assertEqual(settings['GRUB_THEME'], '/boot/grub/themes/desos/theme.txt')
         self.assertEqual(settings['GRUB_GFXMODE'], 'auto')
+        # Without UEFI, a mode the theme fits comes before auto's 640x480.
+        self.assertIn('[ -d /sys/firmware/efi ] || GRUB_GFXMODE=1024x768,800x600,auto\n', text)
         for key in ('GRUB_THEME', 'GRUB_FONT'):
             # Beside grub.cfg, so GRUB can read it before any root filesystem is mounted.
             self.assertTrue(settings[key].startswith('/boot/grub/'))

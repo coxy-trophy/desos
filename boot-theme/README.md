@@ -2,7 +2,7 @@
 
 The GRUB menu of the live medium and of the installed system, in the DEs-UI
 instrument language: the splash ground `#06080b`, the cyan accent `#4fd8ce`,
-the bracketed DesOS wordmark, Chakra Petch for interface text and JetBrains
+the DesOS bird and wordmark (branding/bird.svg), Chakra Petch for interface text and JetBrains
 Mono for readouts. It is a keyboard-only menu with a clear selected row, a
 countdown readout and meter, key hints, and a plain text menu behind every
 step that can fail.
@@ -82,7 +82,7 @@ To opt out on one machine: a later fragment such as
 
 ## Layout
 
-- Header: wordmark (image, antialiased), a status readout, a hairline.
+- Header: the bird and the wordmark (image, antialiased), a status readout, a hairline.
 - Section row: `SYSTEMS`, the countdown readout on the right, and a rule that
   is also the countdown meter. Pressing any key removes the readout and the
   meter; the hairline stays.
@@ -123,7 +123,7 @@ first.
 
 | Entry | `--class` | Icon |
 |-------|-----------|------|
-| The system (grub-mkconfig does this already) | `desos` (also `gnu-linux`, `gnu`, `os`, `linux`) | bracket mark |
+| The system (grub-mkconfig does this already) | `desos` (also `gnu-linux`, `gnu`, `os`, `linux`) | the bird |
 | Recovery mode | `recovery`, `desos-recovery` | cross |
 | One snapshot | `desos-snapshot`, `snapshot` | clock |
 | The snapshots submenu | `desos-snapshots`, `snapshots` | stacked states |

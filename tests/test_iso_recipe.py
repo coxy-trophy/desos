@@ -119,6 +119,9 @@ class IsoRecipeTests(unittest.TestCase):
         for name in sorted(path.name for path in self.recipe.THEME_SOURCE.glob('*.pf2')):
             self.assertIn(f'/boot/grub/themes/desos/{name}', lines[fonts])
         self.assertIn('set gfxmode=auto', lines)
+        # BIOS asks for a mode the theme fits before falling back to auto (640x480).
+        self.assertIn('if [ "${grub_platform}" = pc ]; then', lines)
+        self.assertIn('set gfxmode=1024x768,800x600,auto', lines)
         self.assertIn('set gfxpayload=keep', lines)
         self.assertIn('background_color 6,8,11', lines)
         self.assertIn('set menu_color_highlight=black/cyan', lines)
