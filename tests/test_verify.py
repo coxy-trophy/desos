@@ -500,8 +500,8 @@ class PackageTests(VerifyCase):
 
     def test_key_file_check_leaves_other_versions_to_the_installed_check(self):
         status = self.root / 'var/lib/dpkg/status'
-        status.write_text(status.read_text().replace('Version: 0.1.1', 'Version: 0.1.2'))
-        self.put('usr/bin/des-ui', 'the 0.1.2 program\n', 0o755)
+        status.write_text(status.read_text().replace('Version: 0.1.1', 'Version: 0.1.0'))
+        self.put('usr/bin/des-ui', 'the 0.1.0 program\n', 0o755)
         self.run_check(full=False)
         self.assertEqual(self.status('packages.installed'), 'fail')
         self.assertEqual(self.by_id['packages.key-files']['details']['other_version_installed'], ['des-ui'])
@@ -580,14 +580,94 @@ class PackageTests(VerifyCase):
 
     def test_wrong_version_and_removed_package_fail(self):
         status = self.root / 'var/lib/dpkg/status'
-        text = status.read_text().replace('Version: 0.1.1', 'Version: 0.1.2')
+        text = status.read_text().replace('Version: 0.1.1', 'Version: 0.1.0')
         text = text.replace('Package: desos-release\nStatus: install ok installed', 'Package: desos-release\nStatus: deinstall ok config-files')
         status.write_text(text)
         self.run_check(full=False)
         self.assertEqual(self.status('packages.installed'), 'fail')
         problems = ' '.join(self.by_id['packages.installed']['details']['problems'])
-        self.assertIn('des-ui is at 0.1.2, manifest has 0.1.1', problems)
+        self.assertIn('des-ui is at 0.1.0, manifest has 0.1.1', problems)
         self.assertIn('desos-release is not installed', problems)
+
+    def upgrade(self, package, version, files):
+        """As apt would: a newer version unpacked, its dpkg status and md5sums rewritten."""
+        status = self.root / 'var/lib/dpkg/status'
+        old = PACKAGES[package][0]
+        status.write_text(status.read_text().replace('Package: %s\nStatus: install ok installed\nArchitecture: %s\nVersion: %s\n'
+                                                     % (package, PACKAGES[package][1], old),
+                                                     'Package: %s\nStatus: install ok installed\nArchitecture: %s\nVersion: %s\n'
+                                                     % (package, PACKAGES[package][1], version)))
+        for relative, (content, mode) in files.items():
+            self.put(relative, content, mode)
+        self.put('var/lib/dpkg/info/%s.md5sums' % package, ''.join(
+            '%s  %s\n' % (hashlib.md5(content.encode()).hexdigest(), relative)
+            for relative, (content, _) in sorted(files.items())))
+
+    def test_newer_package_from_an_update_passes_and_is_listed(self):
+        files = dict(PACKAGES['des-ui'][2])
+        files['usr/bin/des-ui'] = ('#!/bin/sh\necho desktop 0.2\n', 0o755)
+        self.upgrade('des-ui', '0.2.0+dev20261114.1', files)
+        for full in (False, True):
+            result = self.run_check(full=full)
+            self.assertEqual(self.status('packages.installed'), 'pass', full)
+            self.assertEqual(self.by_id['packages.installed']['details']['upgraded'],
+                             [{'package': 'des-ui', 'shipped': '0.1.1', 'installed': '0.2.0+dev20261114.1'}])
+            self.assertIn('upgraded', self.reason('packages.installed'))
+            files_check = 'packages.files' if full else 'packages.key-files'
+            self.assertEqual(self.status(files_check), 'pass', (full, self.reason(files_check)))
+            self.assertEqual(result['overall'], 'pass', (full, {c['id']: c['reason'] for c in result['checks']
+                                                                if c['status'] != 'pass'}))
+        self.assertEqual(self.by_id['packages.files']['details']['packages']['des-ui']['upgraded_to'], '0.2.0+dev20261114.1')
+
+    def test_damage_to_an_upgraded_package_still_fails(self):
+        files = dict(PACKAGES['des-ui'][2])
+        files['usr/bin/des-ui'] = ('#!/bin/sh\necho desktop 0.2\n', 0o755)
+        self.upgrade('des-ui', '0.2.0', files)
+        self.put('usr/bin/des-ui', '#!/bin/sh\necho broken\n', 0o755)
+        self.run_check(full=False)
+        self.assertEqual(self.status('packages.installed'), 'pass')
+        self.assertEqual(self.status('packages.key-files'), 'fail')
+        self.assertIn('des-ui 0.2.0: modified /usr/bin/des-ui', self.reason('packages.key-files'))
+        self.run_check(full=True)
+        self.assertEqual(self.status('packages.files'), 'fail')
+
+    def test_damage_to_a_package_that_was_not_upgraded_still_fails(self):
+        files = dict(PACKAGES['des-ui'][2])
+        self.upgrade('des-ui', '0.2.0', files)
+        image = 'linux-image-' + KERNEL
+        self.put('boot/config-' + KERNEL, 'CONFIG_FIXTURE=n\n')
+        self.run_check(full=True)
+        self.assertEqual(self.status('packages.installed'), 'pass')
+        self.assertEqual(self.status('packages.files'), 'fail')
+        self.assertIn(image, self.reason('packages.files'))
+
+    def test_older_package_still_fails(self):
+        self.upgrade('des-ui', '0.1.0', dict(PACKAGES['des-ui'][2]))
+        self.run_check(full=False)
+        self.assertEqual(self.status('packages.installed'), 'fail')
+        self.assertIn('des-ui is at 0.1.0', self.reason('packages.installed'))
+
+    def test_upgraded_identity_is_checked_against_dpkg(self):
+        new = OS_RELEASE.replace('PRETTY_NAME="DesOS Test"', 'PRETTY_NAME="DesOS Test 2"') + 'LOGO=des-ui\n'
+        files = dict(PACKAGES['desos-release'][2])
+        files['usr/lib/os-release'] = (new, 0o644)
+        self.upgrade('desos-release', '0.0~test1+1', files)
+        self.run_check(full=False)
+        self.assertEqual(self.status('identity.os-release'), 'pass', self.reason('identity.os-release'))
+        self.assertIn('upgraded from 0.0~test1', self.reason('identity.os-release'))
+        self.put('usr/lib/os-release', new + 'HOME_URL="https://example.invalid"\n')
+        self.run_check(full=False)
+        self.assertEqual(self.status('identity.os-release'), 'fail')
+
+    def test_debian_version_order(self):
+        cmp = dv.compare_versions
+        for older, newer in [('0.1.1', '0.2.0'), ('0.2.0', '0.2.0+dev1'), ('0.2.0~rc1', '0.2.0'), ('0.1.0~preview1', '0.1.0~preview1+1'),
+                             ('1.0', '1:0.1'), ('6.18.62-1desos1', '6.18.62-1desos2'), ('1.9', '1.10'), ('1.0a', '1.0b'),
+                             ('1.0', '1.0a'), ('2.1', '2.2'), ('0.2.0+dev20261114.0930', '0.2.0+dev20261114.1015')]:
+            self.assertEqual(cmp(older, newer), -1, (older, newer))
+            self.assertEqual(cmp(newer, older), 1, (older, newer))
+        self.assertEqual(cmp('1.0-1', '1.0-1'), 0)
+        self.assertEqual(cmp('0:1.0', '1.0'), 0)
 
     def test_removing_an_optional_package_is_not_an_integrity_failure(self):
         status = self.root / 'var/lib/dpkg/status'

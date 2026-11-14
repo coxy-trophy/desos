@@ -60,9 +60,9 @@ key, not a production one.
 | `signatures.evidence` | yes | `SHA256SUMS.asc` over `SHA256SUMS` in `/usr/share/doc/desos/build`; that `SHA256SUMS` is the one the signed manifest names; every file in the directory is listed and matches | bad signature, another signer, a `SHA256SUMS` from another build, an edited, missing or unlisted file, or the manifest naming evidence that is absent. *Unknown* on an image whose manifest names none and that ships no `SHA256SUMS` (0.1) |
 | `repository.index` | yes | manifest `artifacts` hashes, `Release` → `Packages` hash, `Packages` entries ↔ manifest packages, trusted keyring = repository copy | any disagreement |
 | `repository.pool` | no | SHA-256 of every `.deb` in the shipped pool against the signed manifest | a package is missing or differs |
-| `packages.installed` | yes | dpkg's status database: each manifest package is `install ok installed` at the manifest version | `des-ui` or `desos-release` removed, other version, broken state |
-| `packages.key-files` | quick only | programs, units and DesOS helpers (`/usr/bin/*`, `/usr/sbin/*`, `/usr/lib/systemd/system/*`, `/usr/lib/desos/*`) of every installed manifest package, SHA-256 against the package's signed per-file list. No `.deb` is unpacked | a listed file is missing, not a regular file, or differs; a list is missing or is not the one the manifest names. *Unknown* when the manifest carries no lists (0.1), or when files were left unhashed by the 256 MiB limit |
-| `packages.files` | no | every file of every manifest package, re-hashed against the payload of its signature-checked `.deb`; the signed per-file list, where present, must describe that payload exactly | content, symlink target or mode bits differ, a file is missing, or list and package disagree |
+| `packages.installed` | yes | dpkg's status database: each manifest package is `install ok installed` at the manifest version, or newer (`upgraded`) | `des-ui` or `desos-release` removed, an older version, broken state |
+| `packages.key-files` | quick only | programs, units and DesOS helpers (`/usr/bin/*`, `/usr/sbin/*`, `/usr/lib/systemd/system/*`, `/usr/lib/desos/*`) of every installed manifest package, SHA-256 against the package's signed per-file list (an upgraded package: MD5 against dpkg's record). No `.deb` is unpacked | a listed file is missing, not a regular file, or differs; a list is missing or is not the one the manifest names. *Unknown* when the manifest carries no lists (0.1), or when files were left unhashed by the 256 MiB limit |
+| `packages.files` | no | every file of every manifest package, re-hashed against the payload of its signature-checked `.deb`; the signed per-file list, where present, must describe that payload exactly (an upgraded package: MD5 against dpkg's record) | content, symlink target or mode bits differ, a file is missing, or list and package disagree |
 | `kernel.provenance` | yes | `kernel-provenance.json` names the kernel image package by the same SHA-256 as the signed manifest; `source-pin.json`, `signature-status.txt` and `desktop-pin.json` agree with it | the evidence contradicts the signed manifest |
 | `kernel.release` | yes | running release (`/proc/sys/kernel/osrelease`) against the provenance record | running a kernel that is neither the DesOS one nor an installed Ubuntu kernel package |
 | `kernel.image` | yes | `/boot/vmlinuz-<release>` (and `/cdrom/casper/vmlinuz-<release>` in a live session). Full: SHA-256 against the file inside the signed kernel package. Quick: SHA-256 against the signed per-file list of that package; on an image without lists, MD5 against dpkg's own record (weak) | the file differs |
@@ -86,10 +86,23 @@ Conventions that consumers should know:
 - **A newer DesOS kernel from the update channel is `unknown`.** A running
   `*-desos` kernel that is installed as a package but is not the one in this
   image's manifest gives `kernel.release` `unknown` with `state.kernel`
-  `other`. Note that after any upgrade from a network channel
-  `packages.installed` **fails** for the upgraded packages, because the tool
-  compares only with the repository shipped in the image; teaching it to
-  follow the channel's signed indexes is not done.
+  `other`.
+- **A DesOS package upgraded after install passes, as `upgraded`.** When the
+  installed version is newer than the one in the signed manifest (Debian
+  version order, as `dpkg --compare-versions`), `packages.installed` passes and
+  lists it in `details.upgraded` (`package`, `shipped`, `installed`). Its files
+  can no longer be compared with the signed per-file lists, which describe the
+  shipped version, so `packages.key-files` (programs and units) and
+  `packages.files` (every file) compare them with dpkg's own MD5 record of the
+  version now installed (`details.upgraded`, `upgraded_to`). This still
+  catches damage and partial upgrades, but it is weaker than the signed check:
+  the record lives on the system being checked, so it says nothing about a
+  root-level attacker who installs a higher version, which no self-check can
+  rule out anyway (see *What a pass does and does not prove*). Trust in an upgrade rests on apt, which
+  installed it only from a signed source; `identity.apt-sources` reports those.
+  An upgraded `desos-release` is checked the same way: `/etc/os-release` must be
+  the file dpkg recorded for the installed version. An **older** version than
+  the manifest's still fails, as does a removed `des-ui` or `desos-release`.
 - **The Ubuntu compatibility kernel is not a failure.** `kernel.release`,
   `kernel.image` and `kernel.config` become `unknown` with a reason saying the
   Ubuntu kernel is running and DesOS evidence does not cover it;
