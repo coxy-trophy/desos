@@ -12,9 +12,10 @@ import tempfile
 PACKAGE = "desos-release"
 # The package version, not the DesOS release: os-release below still says
 # 0.1.0-preview1. "+1" marks the rebuild whose content changed
-# (VERSION_CODENAME) after 0.1.0~preview1 had shipped in the 0.1 image; a
-# version is never reused for different bytes (image/package-ledger.json).
-VERSION = "0.1.0~preview1+1"
+# (VERSION_CODENAME) after 0.1.0~preview1 had shipped in the 0.1 image, "+2"
+# the one that added LOGO; a version is never reused for different bytes
+# (image/package-ledger.json).
+VERSION = "0.1.0~preview1+2"
 EPOCH = 1794268800
 # VERSION_CODENAME names the apt suite third-party tools build sources from
 # (lsb_release -cs, add-apt-repository, vendor install scripts), so it must be
@@ -28,6 +29,7 @@ VERSION_ID="0.1.0"
 VERSION_CODENAME=resolute
 UBUNTU_CODENAME=resolute
 ANSI_COLOR="0;36"
+LOGO=des-ui
 '''
 LSB_RELEASE = '''DISTRIB_ID=DesOS
 DISTRIB_RELEASE=0.1.0-preview1

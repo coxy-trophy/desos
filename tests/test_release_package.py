@@ -41,7 +41,7 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertIn("Package: desos-release\n", fields)
         # The content changed (VERSION_CODENAME) after 0.1.0~preview1 shipped, so
         # the package version moved on; the DesOS release strings did not.
-        self.assertIn("Version: 0.1.0~preview1+1\n", fields)
+        self.assertIn("Version: 0.1.0~preview1+2\n", fields)
         subprocess.run(["dpkg", "--compare-versions", self.builder.VERSION, "gt", "0.1.0~preview1"], check=True)
         ledger = json.loads((SOURCE.parent / "package-ledger.json").read_text())
         shipped = [entry for entry in ledger["packages"] if entry["package"] == "desos-release"]
