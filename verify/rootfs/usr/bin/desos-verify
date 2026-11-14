@@ -72,6 +72,29 @@ DEFAULT_PATHS = {
 SECURE_BOOT_VAR = 'efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c'
 UBUNTU_HOSTS = ('archive.ubuntu.com', 'security.ubuntu.com', 'ports.ubuntu.com')
 UBUNTU_KEYRING = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'
+# Sources DesOS itself configures, besides Ubuntu's and its own repository: the
+# makers' repositories for Brave and Visual Studio Code, and DEs-UI developer
+# channels (desos-dev). Each is recognised only with its own keyring, so the
+# DesOS archive key is never trusted elsewhere. (file name, scheme, host, path
+# prefix or None, keyring)
+KNOWN_SOURCES = (
+    ('brave-browser.sources', 'https', 'brave-browser-apt-release.s3.brave.com', None,
+     '/usr/share/keyrings/brave-browser-archive-keyring.gpg'),
+    ('vscode.sources', 'https', 'packages.microsoft.com', '/repos/code', '/usr/share/keyrings/microsoft.gpg'),
+    ('desos-dev.sources', 'file', None, '/var/lib/desos-dev/channel', '/usr/share/keyrings/desos-dev.gpg'),
+    ('desos-dev-published.sources', 'https', None, None, '/usr/share/keyrings/desos-dev-published.gpg'),
+)
+
+
+def known_source(entry, parsed):
+    """The name of the DesOS-configured source this entry is, or None."""
+    name = os.path.basename(entry['file'])
+    for file, scheme, host, prefix, keyring in KNOWN_SOURCES:
+        if name == file and entry['signed_by'] == keyring and parsed and all(
+                u.scheme == scheme and (host is None or u.hostname == host)
+                and (prefix is None or os.path.normpath('/' + u.path.lstrip('/')).startswith(prefix)) for u in parsed):
+            return file
+    return None
 EXPECTED_ROOT_FS = {'installed': ('btrfs', 'ext4'), 'live': ('overlay',)}
 # Removing these breaks the system's identity or desktop; any other DesOS package
 # may be uninstalled by its owner without that counting against integrity.
@@ -1330,7 +1353,7 @@ class Verifier:
             return self.add('identity.apt-sources', UNKNOWN, 'apt sources are unreadable: %s' % error)
         repo = '/' + self.cfg.paths['repository'].strip('/')
         key = '/' + self.cfg.paths['key'].strip('/')
-        own, problems, unexpected = [], [], []
+        own, problems, unexpected, known = [], [], [], []
 
         def describe(entry):
             return '%s (%s %s)' % (entry['file'], ' '.join(entry['uris']), ' '.join(entry['suites']))
@@ -1344,22 +1367,29 @@ class Verifier:
                 if len(parsed) != 1 or entry['suites'] != ['desos'] or entry['components'] != ['main'] \
                         or entry['signed_by'] != key:
                     problems.append('the DesOS source in %s is not the shipped definition' % entry['file'])
+            elif entry['signed_by'] == key and os.path.basename(entry['file']) == 'desos-updates.sources' \
+                    and entry['suites'] == ['desos'] and parsed and all(u.scheme == 'https' for u in parsed):
+                known.append('desos-updates.sources')
             elif entry['signed_by'] == key:
                 problems.append('%s trusts the DesOS archive key for a different location' % describe(entry))
+            elif known_source(entry, parsed):
+                known.append(known_source(entry, parsed))
             elif not (parsed and all(u.scheme in ('http', 'https') and (
                     u.hostname in UBUNTU_HOSTS or (u.hostname or '').endswith('.archive.ubuntu.com')) for u in parsed)
                     and entry['signed_by'] == UBUNTU_KEYRING):
                 unexpected.append(describe(entry))
         if len(own) != 1:
             problems.append('%d enabled apt sources point at the shipped DesOS repository; exactly one is expected' % len(own))
-        details = {'sources': len(entries), 'unexpected': shorten(unexpected)}
+        details = {'sources': len(entries), 'unexpected': shorten(unexpected), 'known': sorted(known)}
         if problems:
             return self.add('identity.apt-sources', FAIL, '; '.join(problems[:3]), problems=shorten(problems), **details)
         if unexpected:
             return self.add('identity.apt-sources', UNKNOWN, '%d additional apt source(s) could supply packages with DesOS '
                             'names: %s' % (len(unexpected), '; '.join(unexpected[:3])), **details)
-        self.add('identity.apt-sources', PASS, 'DesOS packages can come only from the signed shipped repository; the '
-                 'other %d source(s) are Ubuntu\'s own archives' % (len(entries) - 1), **details)
+        self.add('identity.apt-sources', PASS, 'DesOS packages can come only from the signed shipped repository%s; the '
+                 'other %d source(s) are Ubuntu\'s own archives' % (
+                     ' and the sources DesOS configures (%s)' % ', '.join(sorted(known)) if known else '',
+                     len(entries) - 1 - len(known)), **details)
 
     # --- state --------------------------------------------------------------
 

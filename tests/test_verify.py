@@ -957,6 +957,30 @@ class IdentityTests(VerifyCase):
         self.assertEqual(self.sources('evil.sources', DESOS_SOURCES.replace('file:/usr/share/desos/repository',
                                                                             'https://evil.example.invalid')), 'fail')
 
+    def test_sources_desos_configures_pass_only_with_their_own_keyrings(self):
+        vendor = Path(__file__).resolve().parents[1] / 'image/vendor'
+        for name in ('brave-browser.sources', 'vscode.sources'):
+            self.assertEqual(self.sources(name, (vendor / name).read_text()), 'pass', name)
+        self.assertIn('vscode.sources', self.by_id['identity.apt-sources']['details']['known'])
+        dev = ('Types: deb\nURIs: file:/var/lib/desos-dev/channel/\nSuites: ./\n'
+               'Signed-By: /usr/share/keyrings/desos-dev.gpg\n')
+        self.assertEqual(self.sources('desos-dev.sources', dev), 'pass')
+        published = ('Types: deb\nURIs: https://coxy.example.invalid/desos-dev/\nSuites: ./\n'
+                     'Signed-By: /usr/share/keyrings/desos-dev-published.gpg\n')
+        self.assertEqual(self.sources('desos-dev-published.sources', published), 'pass')
+        # The same file names with another keyring or another place are not recognised.
+        self.assertEqual(self.sources('vscode.sources', (vendor / 'vscode.sources').read_text().replace(
+            'microsoft.gpg', 'other.gpg')), 'unknown')
+        self.assertEqual(self.sources('vscode.sources', (vendor / 'vscode.sources').read_text().replace(
+            'packages.microsoft.com', 'evil.example.invalid')), 'unknown')
+        self.assertEqual(self.sources('desos-dev.sources', dev.replace('/var/lib/desos-dev/channel', '/tmp/x')), 'unknown')
+
+    def test_enabled_update_channel_passes_but_only_under_its_own_name(self):
+        channel = DESOS_SOURCES.replace('file:/usr/share/desos/repository', 'https://updates.example.invalid')
+        self.assertEqual(self.sources('desos-updates.sources', channel), 'pass')
+        (self.root / 'etc/apt/sources.list.d/desos-updates.sources').unlink()
+        self.assertEqual(self.sources('other.sources', channel), 'fail')
+
     def test_altered_missing_or_duplicated_desos_source_fails(self):
         self.assertEqual(self.sources('desos.sources', DESOS_SOURCES.replace(
             'Signed-By: /usr/share/keyrings/desos-archive-keyring.asc', 'Trusted: yes')), 'fail')
