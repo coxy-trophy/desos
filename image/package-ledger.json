@@ -10,10 +10,24 @@
     },
     {
       "architecture": "amd64",
+      "package": "des-ui",
+      "recorded": "repository build 2026-11-14",
+      "sha256": "6b17f56f54c33c4462b4ac31e542885e70279fb109c9ab5d816c1a3ac42d99e9",
+      "version": "0.2.0"
+    },
+    {
+      "architecture": "amd64",
       "package": "des-ui-greeter",
       "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
       "sha256": "2a4724d5faf70f888f3ba6e7dc3c11402f6fbab8133eaaea2d7746595984343c",
       "version": "0.1.1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "des-ui-greeter",
+      "recorded": "repository build 2026-11-14",
+      "sha256": "99915bde7590d56b4a462501876fcad609718fb2ecfdccf814c9f35e18786da1",
+      "version": "0.2.0"
     },
     {
       "architecture": "amd64",
@@ -24,10 +38,24 @@
     },
     {
       "architecture": "amd64",
+      "package": "des-ui-music",
+      "recorded": "repository build 2026-11-14",
+      "sha256": "1dc5fcb42ca5c22d03b553aee1ba53e875d5d1519d7b37232466bdb5a46bc26f",
+      "version": "0.2.0"
+    },
+    {
+      "architecture": "amd64",
       "package": "des-ui-plymouth",
       "recorded": "DesOS 0.1 Preview image repository (2026-11-10)",
       "sha256": "1f83fa964c3cabd68d2f91b5f5a52cac2f6131451fd5445a288cda304e173535",
       "version": "0.1.1"
+    },
+    {
+      "architecture": "amd64",
+      "package": "des-ui-plymouth",
+      "recorded": "repository build 2026-11-14",
+      "sha256": "0f68c94abab1036df36fc947189a7fab65bc50d1cbf8c6da9226f456284b416b",
+      "version": "0.2.0"
     },
     {
       "architecture": "all",
@@ -45,6 +73,13 @@
     },
     {
       "architecture": "all",
+      "package": "desos-release",
+      "recorded": "repository build 2026-11-14",
+      "sha256": "824b39e858fb3ce6395c8357ea0d9288a01f61c77683d2735431302d68d210de",
+      "version": "0.1.0~preview1+2"
+    },
+    {
+      "architecture": "all",
       "package": "desos-verify",
       "recorded": "repository build 2026-11-13",
       "sha256": "f5e732f397100add16eb888a92cc697111ce8c601787c731c8bf50f59aa401e5",
@@ -56,6 +91,13 @@
       "recorded": "repository build 2026-11-13",
       "sha256": "16c43ec7d67f0df0747e0fa65bbe587b1bdfd32d60453d7c4c9bcb1ad32f0b5a",
       "version": "2.1"
+    },
+    {
+      "architecture": "all",
+      "package": "desos-verify",
+      "recorded": "repository build 2026-11-14",
+      "sha256": "d24a584bd7f5a41ab9ce26338c02877bbf263a81a60128df558b6b24047caf6f",
+      "version": "2.2"
     },
     {
       "architecture": "amd64",
