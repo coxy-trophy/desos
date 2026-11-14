@@ -5,8 +5,9 @@
     desos-dev update [--source DIR] [--no-pull]
                                           pull, build, sign into the channel, upgrade
     desos-dev status                      what is installed and what the channel holds
-    desos-dev publish --pages DIR         copy the channel into a GitHub Pages checkout and push it
-    desos-dev follow URL                  on another machine: take updates from a published channel
+    desos-dev publish [--repo OWNER/NAME] [--tag updates]
+                                          upload the channel as the files of a GitHub release
+    desos-dev follow [URL]                on another machine: take updates from a published channel
 
 Updates go through apt, so desos-undo takes its snapshot first and
 `sudo desos-undo rollback` brings back the desktop as it was.
@@ -23,6 +24,9 @@ import sys
 import urllib.request
 
 REPOSITORY = 'https://github.com/coxy-trophy/des-ui.git'
+# Where `publish` uploads and `follow` reads by default: a release of the DesOS repository.
+RELEASES = 'coxy-trophy/desos'
+TAG = 'updates'
 SOURCE = Path.home() / 'des-ui'
 PACKAGES = ('des-ui', 'des-ui-music', 'des-ui-greeter', 'des-ui-plymouth')
 CHANNEL = Path('/var/lib/desos-dev/channel')
@@ -122,23 +126,26 @@ def status():
     print(json.dumps({'installed': installed(), 'channel': channel, 'source': str(SOURCE)}, indent=2))
 
 
-def publish(pages):
-    """Copy the signed channel into a git checkout served by GitHub Pages, then push."""
-    if not (pages / '.git').is_dir():
-        raise SystemExit(f'desos-dev: {pages} is not a git checkout of the Pages repository')
-    target = pages / 'desos-dev'
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(CHANNEL, target)
-    shutil.copyfile('/usr/share/keyrings/desos-dev.gpg', target / 'desos-dev.gpg')
-    (pages / '.nojekyll').touch()
-    run(['git', '-C', str(pages), 'add', '-A'])
-    if run(['git', '-C', str(pages), 'diff', '--cached', '--quiet'], check=False).returncode == 0:
-        say('nothing new to publish')
-        return
-    run(['git', '-C', str(pages), 'commit', '-q', '-m', 'Publish DEs-UI developer channel'])
-    run(['git', '-C', str(pages), 'push', '-q'])
-    say('published')
+def publish(repo, tag):
+    """Upload the signed channel as the files of one GitHub release (needs `gh auth login`)."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='desos-dev-publish-') as staging:
+        os.chmod(staging, 0o755)
+        sudo('desos-dev-channel', 'export', staging)
+        assets = sorted(Path(staging).iterdir())
+        if run(['gh', 'release', 'view', tag, '--repo', repo], capture_output=True, check=False).returncode != 0:
+            say(f'creating the "{tag}" release in {repo}')
+            run(['gh', 'release', 'create', tag, '--repo', repo, '--title', 'DEs-UI updates', '--prerelease',
+                 '--notes', 'The DEs-UI developer channel: an apt repository. On DesOS: '
+                            f'desos-dev follow https://github.com/{repo}/releases/download/{tag}'])
+        say(f'uploading {len(assets)} files')
+        run(['gh', 'release', 'upload', tag, '--repo', repo, '--clobber', *map(str, assets)])
+        listed = run(['gh', 'release', 'view', tag, '--repo', repo, '--json', 'assets', '--jq', '.assets[].name'],
+                     capture_output=True, text=True).stdout.split()
+        keep = {path.name for path in assets}
+        for name in sorted(set(listed) - keep):
+            run(['gh', 'release', 'delete-asset', tag, name, '--repo', repo, '--yes'])
+    say(f'published: https://github.com/{repo}/releases/download/{tag}')
 
 
 def follow(url):
@@ -168,9 +175,10 @@ def main(argv=None):
             command.add_argument('--no-pull', action='store_true', help='build what is checked out, as it is')
     sub.add_parser('status')
     publishing = sub.add_parser('publish')
-    publishing.add_argument('--pages', type=Path, required=True)
+    publishing.add_argument('--repo', default=RELEASES)
+    publishing.add_argument('--tag', default=TAG)
     following = sub.add_parser('follow')
-    following.add_argument('url')
+    following.add_argument('url', nargs='?', default=f'https://github.com/{RELEASES}/releases/download/{TAG}')
     args = parser.parse_args(argv)
     if os.geteuid() == 0:
         raise SystemExit('desos-dev: run as yourself, not root; it asks for your password when needed')
@@ -182,7 +190,7 @@ def main(argv=None):
         elif args.command == 'status':
             status()
         elif args.command == 'publish':
-            publish(args.pages)
+            publish(args.repo, args.tag)
         else:
             follow(args.url)
     except subprocess.CalledProcessError as error:

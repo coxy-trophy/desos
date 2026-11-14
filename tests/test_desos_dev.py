@@ -61,6 +61,16 @@ class ChannelTests(unittest.TestCase):
         for bad in ('linux-image_1_amd64.deb', 'des-ui_0.2.0_amd64.deb.sig', '../des-ui_0.2.0_amd64.deb', 'sudo_1_amd64.deb'):
             self.assertFalse(channel.PACKAGE.match(bad), bad)
 
+    def test_release_assets_get_names_github_keeps(self):
+        self.assertEqual(channel.asset_name('des-ui_0.2.0+dev202611140930.gabc_amd64.deb'),
+                         'des-ui_0.2.0_dev202611140930.gabc_amd64.deb')
+        self.assertEqual(channel.asset_name('des-ui_1:0.2~rc1_amd64.deb'), 'des-ui_1_0.2_rc1_amd64.deb')
+        self.assertEqual(channel.flat_filenames(b'Package: des-ui\nFilename: ./des-ui_0.2.0_amd64.deb\nSize: 1\n'),
+                         b'Package: des-ui\nFilename: des-ui_0.2.0_amd64.deb\nSize: 1\n')
+
+    def test_follow_defaults_to_the_desos_updates_release(self):
+        self.assertEqual((dev.RELEASES, dev.TAG), ('coxy-trophy/desos', 'updates'))
+
     @unittest.skipUnless(HAS_DPKG, 'dpkg not installed')
     def test_prune_keeps_the_newest_three_builds_of_each_package(self):
         names = [f'des-ui_0.2.0+dev20261114093{i}.gabc_amd64.deb' for i in range(5)] + ['des-ui-music_0.2.0_amd64.deb']

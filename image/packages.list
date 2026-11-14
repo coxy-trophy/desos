@@ -114,6 +114,7 @@ unzip
 # Building DEs-UI on the machine itself (desos-dev update): the toolchain and
 # the libraries its build links against (des-ui/.github/workflows/ci.yml).
 git
+gh
 openssh-client
 build-essential
 pkg-config

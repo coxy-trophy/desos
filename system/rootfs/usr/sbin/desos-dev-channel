@@ -9,6 +9,7 @@ Run as root (desos-dev calls it through sudo). It owns three things:
 
     desos-dev-channel init                 make the key, the repository and the source
     desos-dev-channel add DEB...           add DEs-UI packages, re-sign, keep the last few builds
+    desos-dev-channel export DIR           a copy for GitHub Releases: release-safe file names, signed
     desos-dev-channel status               print the channel's state as JSON
 
 The DesOS archive key is never used here: a key that can only sign this
@@ -136,6 +137,39 @@ def index():
     write(CHANNEL / 'InRelease', signed, 0o644)
 
 
+def asset_name(name):
+    """A file name GitHub keeps as it is: it renames anything outside these."""
+    return re.sub(r'[^A-Za-z0-9._-]', '_', name)
+
+
+def flat_filenames(packages):
+    """apt-ftparchive writes "Filename: ./x.deb"; a release asset is just "x.deb"."""
+    return re.sub(rb'^Filename: \./', b'Filename: ', packages, flags=re.M)
+
+
+def export(target):
+    """The channel as GitHub release assets, in `target` (a new, empty folder)."""
+    target = Path(target)
+    if fingerprint() is None:
+        raise SystemExit('desos-dev-channel: run "desos-dev setup" first')
+    if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+        raise SystemExit(f'desos-dev-channel: {target} must be an empty folder')
+    for deb in sorted(CHANNEL.glob('*.deb')):
+        shutil.copyfile(deb, target / asset_name(deb.name))
+    packages = run(['apt-ftparchive', 'packages', '.'], cwd=target, capture_output=True).stdout
+    (target / 'Packages').write_bytes(flat_filenames(packages))
+    release = run(['apt-ftparchive', '-o', 'APT::FTPArchive::Release::Origin=DesOS developer',
+                   '-o', 'APT::FTPArchive::Release::Label=desos-dev', 'release', '.'],
+                  cwd=target, capture_output=True).stdout
+    (target / 'Release').write_bytes(release)
+    signed = gpg('--clearsign', '--digest-algo', 'SHA512', '--output', '-', str(target / 'Release'), capture_output=True).stdout
+    (target / 'InRelease').write_bytes(signed)
+    (target / 'desos-dev.gpg').write_bytes(KEYRING.read_bytes())
+    for path in target.iterdir():
+        os.chmod(path, 0o644)
+    return sorted(p.name for p in target.iterdir())
+
+
 def status():
     key = fingerprint() if GNUPG.is_dir() else None
     packages = sorted(p.name for p in CHANNEL.glob('*.deb')) if CHANNEL.is_dir() else []
@@ -148,6 +182,8 @@ def main(argv=None):
     sub.add_parser('init')
     adding = sub.add_parser('add')
     adding.add_argument('debs', nargs='+')
+    exporting = sub.add_parser('export')
+    exporting.add_argument('target')
     sub.add_parser('status')
     args = parser.parse_args(argv)
     if args.command != 'status' and os.geteuid() != 0:
@@ -157,6 +193,8 @@ def main(argv=None):
     elif args.command == 'add':
         add(args.debs)
         print(json.dumps(status()))
+    elif args.command == 'export':
+        print(json.dumps({'assets': export(args.target)}))
     else:
         print(json.dumps(status()))
 
