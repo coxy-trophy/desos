@@ -1,0 +1,165 @@
+#!/usr/bin/python3 -I
+"""The local DEs-UI developer channel: a signed apt repository on this machine.
+
+Run as root (desos-dev calls it through sudo). It owns three things:
+
+    /var/lib/desos-dev/gnupg      a signing key made on this machine, for this channel only
+    /var/lib/desos-dev/channel    the repository: the packages, Packages, Release, InRelease
+    /etc/apt/sources.list.d/desos-dev.sources   the apt source, signed by that key alone
+
+    desos-dev-channel init                 make the key, the repository and the source
+    desos-dev-channel add DEB...           add DEs-UI packages, re-sign, keep the last few builds
+    desos-dev-channel status               print the channel's state as JSON
+
+The DesOS archive key is never used here: a key that can only sign this
+machine's own builds of DEs-UI is all a developer channel needs.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+BASE = Path('/var/lib/desos-dev')
+GNUPG = BASE / 'gnupg'
+CHANNEL = BASE / 'channel'
+KEYRING = Path('/usr/share/keyrings/desos-dev.gpg')
+SOURCE = Path('/etc/apt/sources.list.d/desos-dev.sources')
+# Only DEs-UI's own packages may enter the channel.
+PACKAGE = re.compile(r'^(des-ui(?:-music|-greeter|-plymouth)?)_([0-9][A-Za-z0-9.+~-]*)_(amd64|all)\.deb$')
+KEEP = 3
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def gpg(*args, **kwargs):
+    return run(['gpg', '--batch', '--no-tty', '--homedir', str(GNUPG), *args], **kwargs)
+
+
+def source_text(channel=CHANNEL, keyring=KEYRING):
+    return ('# DEs-UI built on this machine by desos-dev, signed by its own key.\n'
+            'Types: deb\n'
+            f'URIs: file:{channel}/\n'
+            'Suites: ./\n'
+            f'Signed-By: {keyring}\n')
+
+
+def fingerprint():
+    out = gpg('--with-colons', '--list-secret-keys', capture_output=True, text=True).stdout
+    fprs = [line.split(':')[9] for line in out.splitlines() if line.startswith('fpr:')]
+    return fprs[0] if fprs else None
+
+
+def init():
+    BASE.mkdir(mode=0o755, exist_ok=True)
+    GNUPG.mkdir(mode=0o700, exist_ok=True)
+    CHANNEL.mkdir(mode=0o755, exist_ok=True)
+    if fingerprint() is None:
+        host = os.uname().nodename
+        gpg('--quick-generate-key', '--passphrase', '', f'DesOS developer channel ({host})', 'ed25519', 'sign', 'never')
+    key = fingerprint()
+    exported = gpg('--export', key, capture_output=True).stdout
+    write(KEYRING, exported, 0o644)
+    write(SOURCE, source_text().encode(), 0o644)
+    index()
+    return key
+
+
+def write(path, data, mode):
+    """Replace `path` through a new file, so a reader never sees half of it."""
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        handle.write(data)
+    os.chmod(handle.name, mode)
+    os.replace(handle.name, path)
+
+
+def version_key(version):
+    """dpkg's order, from dpkg itself."""
+    import functools
+
+    def compare(a, b):
+        if a == b:
+            return 0
+        return -1 if subprocess.run(['dpkg', '--compare-versions', a, 'lt', b]).returncode == 0 else 1
+    return functools.cmp_to_key(compare)(version)
+
+
+def prune(names, keep=KEEP):
+    """The package files to delete: all but the newest `keep` of each package."""
+    by_package = {}
+    for name in names:
+        match = PACKAGE.match(name)
+        if match:
+            by_package.setdefault(match.group(1), []).append((match.group(2), name))
+    doomed = []
+    for builds in by_package.values():
+        builds.sort(key=lambda build: version_key(build[0]), reverse=True)
+        doomed += [name for _, name in builds[keep:]]
+    return sorted(doomed)
+
+
+def add(debs):
+    if fingerprint() is None:
+        raise SystemExit('desos-dev-channel: run "desos-dev setup" first')
+    for deb in debs:
+        path = Path(deb)
+        if not PACKAGE.match(path.name) or path.is_symlink() or not path.is_file():
+            raise SystemExit(f'desos-dev-channel: not a DEs-UI package: {deb}')
+        fields = run(['dpkg-deb', '--field', str(path), 'Package', 'Version'], capture_output=True, text=True).stdout
+        package = PACKAGE.match(path.name)
+        if f'Package: {package.group(1)}' not in fields or f'Version: {package.group(2)}' not in fields:
+            raise SystemExit(f'desos-dev-channel: {path.name} does not hold what its name says')
+    for deb in debs:
+        target = CHANNEL / Path(deb).name
+        shutil.copyfile(deb, target)
+        os.chmod(target, 0o644)
+    for name in prune([p.name for p in CHANNEL.glob('*.deb')]):
+        (CHANNEL / name).unlink()
+    index()
+
+
+def index():
+    """Packages, Release and its signature, InRelease."""
+    packages = run(['apt-ftparchive', 'packages', '.'], cwd=CHANNEL, capture_output=True).stdout
+    write(CHANNEL / 'Packages', packages, 0o644)
+    release = run(['apt-ftparchive', '-o', 'APT::FTPArchive::Release::Origin=DesOS developer',
+                   '-o', 'APT::FTPArchive::Release::Label=desos-dev', 'release', '.'],
+                  cwd=CHANNEL, capture_output=True).stdout
+    write(CHANNEL / 'Release', release, 0o644)
+    signed = gpg('--clearsign', '--digest-algo', 'SHA512', '--output', '-', str(CHANNEL / 'Release'), capture_output=True).stdout
+    write(CHANNEL / 'InRelease', signed, 0o644)
+
+
+def status():
+    key = fingerprint() if GNUPG.is_dir() else None
+    packages = sorted(p.name for p in CHANNEL.glob('*.deb')) if CHANNEL.is_dir() else []
+    return {'ready': key is not None and SOURCE.is_file(), 'key': key, 'channel': str(CHANNEL), 'packages': packages}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('init')
+    adding = sub.add_parser('add')
+    adding.add_argument('debs', nargs='+')
+    sub.add_parser('status')
+    args = parser.parse_args(argv)
+    if args.command != 'status' and os.geteuid() != 0:
+        raise SystemExit('desos-dev-channel: run as root (desos-dev calls it through sudo)')
+    if args.command == 'init':
+        print(json.dumps({'key': init()}))
+    elif args.command == 'add':
+        add(args.debs)
+        print(json.dumps(status()))
+    else:
+        print(json.dumps(status()))
+
+
+if __name__ == '__main__':
+    sys.exit(main())

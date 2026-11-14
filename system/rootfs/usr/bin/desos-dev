@@ -1,0 +1,193 @@
+#!/usr/bin/python3 -I
+"""Work on DEs-UI from DesOS itself: build it here and update to it with apt.
+
+    desos-dev setup [--source DIR]        once: get DEs-UI's source and make the local channel
+    desos-dev update [--source DIR] [--no-pull]
+                                          pull, build, sign into the channel, upgrade
+    desos-dev status                      what is installed and what the channel holds
+    desos-dev publish --pages DIR         copy the channel into a GitHub Pages checkout and push it
+    desos-dev follow URL                  on another machine: take updates from a published channel
+
+Updates go through apt, so desos-undo takes its snapshot first and
+`sudo desos-undo rollback` brings back the desktop as it was.
+"""
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import urllib.request
+
+REPOSITORY = 'https://github.com/coxy-trophy/des-ui.git'
+SOURCE = Path.home() / 'des-ui'
+PACKAGES = ('des-ui', 'des-ui-music', 'des-ui-greeter', 'des-ui-plymouth')
+CHANNEL = Path('/var/lib/desos-dev/channel')
+FOLLOW_KEYRING = Path('/usr/share/keyrings/desos-dev-published.gpg')
+FOLLOW_SOURCE = Path('/etc/apt/sources.list.d/desos-dev-published.sources')
+
+
+def say(text):
+    print(f'desos-dev: {text}', flush=True)
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def sudo(*command):
+    return run(['sudo', *command])
+
+
+def dev_version(base, stamp, commit):
+    """A version above `base` and above every earlier build: base+devYYYYMMDDHHMM.gSHA.
+    An official release of the next version still sorts above it."""
+    return f'{base}+dev{stamp:%Y%m%d%H%M}.g{commit[:9]}'
+
+
+def cargo_version(source):
+    text = (source / 'shell/Cargo.toml').read_text()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    if not match:
+        raise SystemExit(f'desos-dev: no version in {source}/shell/Cargo.toml')
+    return match.group(1)
+
+
+def ensure_toolchain():
+    if shutil.which('cargo') and run(['cargo', '--version'], capture_output=True).returncode == 0:
+        return
+    say('installing the stable Rust toolchain (rustup, once)')
+    run(['rustup', 'default', 'stable'])
+
+
+def setup(source):
+    if not (source / '.git').is_dir():
+        say(f'getting DEs-UI into {source}')
+        run(['git', 'clone', REPOSITORY, str(source)])
+    ensure_toolchain()
+    say('making the local channel (asks for your password)')
+    sudo('desos-dev-channel', 'init')
+    say('ready: run "desos-dev update" after you change DEs-UI')
+
+
+def installed():
+    out = subprocess.run(['dpkg-query', '-W', '-f', '${Package} ${Version} ${db:Status-Abbrev}\\n', *PACKAGES],
+                         capture_output=True, text=True).stdout
+    return {fields[0]: fields[1] for fields in (line.split() for line in out.splitlines())
+            if len(fields) >= 3 and fields[2].startswith('ii')}
+
+
+def update(source, pull):
+    if not (source / '.git').is_dir():
+        raise SystemExit(f'desos-dev: no DEs-UI checkout at {source}; run "desos-dev setup" first')
+    if pull:
+        say('pulling the latest DEs-UI')
+        run(['git', '-C', str(source), 'pull', '--ff-only'])
+    ensure_toolchain()
+    commit = run(['git', '-C', str(source), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    dirty = run(['git', '-C', str(source), 'status', '--porcelain'], capture_output=True, text=True).stdout.strip()
+    version = dev_version(cargo_version(source), datetime.datetime.now(datetime.timezone.utc), commit)
+    if dirty:
+        say('note: building uncommitted changes too')
+    say(f'building DEs-UI {version} (the first build takes a while)')
+    env = dict(os.environ, DESUI_DEB_VERSION=version)
+    run(['sh', 'packaging/build-deb.sh'], cwd=source, env=env)
+    debs = sorted(str(p) for p in (source / 'target/deb').glob(f'*_{version}_*.deb'))
+    if not debs:
+        raise SystemExit('desos-dev: the build made no packages')
+    say('signing into the local channel and upgrading (asks for your password)')
+    sudo('desos-dev-channel', 'add', *debs)
+    # Read only the local channel, so an update works offline and fast.
+    sudo('apt-get', 'update', '-o', 'Dir::Etc::sourcelist=/etc/apt/sources.list.d/desos-dev.sources',
+         '-o', 'Dir::Etc::sourceparts=-', '-o', 'APT::Get::List-Cleanup=0')
+    present = sorted(installed())
+    if present:
+        sudo('apt-get', 'install', '-y', '--only-upgrade', *present)
+    else:
+        sudo('apt-get', 'install', '-y', 'des-ui')
+    now = installed()
+    say('installed: ' + ', '.join(f'{name} {v}' for name, v in sorted(now.items())))
+    say('log out and back in to start the new desktop')
+
+
+def status():
+    channel = subprocess.run(['desos-dev-channel', 'status'], capture_output=True, text=True).stdout
+    try:
+        channel = json.loads(channel)
+    except json.JSONDecodeError:
+        channel = None
+    print(json.dumps({'installed': installed(), 'channel': channel, 'source': str(SOURCE)}, indent=2))
+
+
+def publish(pages):
+    """Copy the signed channel into a git checkout served by GitHub Pages, then push."""
+    if not (pages / '.git').is_dir():
+        raise SystemExit(f'desos-dev: {pages} is not a git checkout of the Pages repository')
+    target = pages / 'desos-dev'
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(CHANNEL, target)
+    shutil.copyfile('/usr/share/keyrings/desos-dev.gpg', target / 'desos-dev.gpg')
+    (pages / '.nojekyll').touch()
+    run(['git', '-C', str(pages), 'add', '-A'])
+    if run(['git', '-C', str(pages), 'diff', '--cached', '--quiet'], check=False).returncode == 0:
+        say('nothing new to publish')
+        return
+    run(['git', '-C', str(pages), 'commit', '-q', '-m', 'Publish DEs-UI developer channel'])
+    run(['git', '-C', str(pages), 'push', '-q'])
+    say('published')
+
+
+def follow(url):
+    url = url.rstrip('/')
+    if not url.startswith('https://'):
+        raise SystemExit('desos-dev: the published channel must be an https:// address')
+    key = urllib.request.urlopen(f'{url}/desos-dev.gpg', timeout=30).read()
+    shown = subprocess.run(['gpg', '--show-keys', '--with-fingerprint'], input=key, capture_output=True).stdout.decode()
+    print(shown)
+    if input('Trust this key for DEs-UI updates? Type yes: ').strip() != 'yes':
+        raise SystemExit('desos-dev: not changed')
+    source = (f'# DEs-UI from {url}, signed by the developer key shown when it was added.\n'
+              f'Types: deb\nURIs: {url}/\nSuites: ./\nSigned-By: {FOLLOW_KEYRING}\n')
+    run(['sudo', 'tee', str(FOLLOW_KEYRING)], input=key, stdout=subprocess.DEVNULL)
+    run(['sudo', 'tee', str(FOLLOW_SOURCE)], input=source.encode(), stdout=subprocess.DEVNULL)
+    say('done: "sudo apt update && sudo apt upgrade" now includes DEs-UI from there')
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    for name in ('setup', 'update'):
+        command = sub.add_parser(name)
+        command.add_argument('--source', type=Path, default=SOURCE)
+        if name == 'update':
+            command.add_argument('--no-pull', action='store_true', help='build what is checked out, as it is')
+    sub.add_parser('status')
+    publishing = sub.add_parser('publish')
+    publishing.add_argument('--pages', type=Path, required=True)
+    following = sub.add_parser('follow')
+    following.add_argument('url')
+    args = parser.parse_args(argv)
+    if os.geteuid() == 0:
+        raise SystemExit('desos-dev: run as yourself, not root; it asks for your password when needed')
+    try:
+        if args.command == 'setup':
+            setup(args.source)
+        elif args.command == 'update':
+            update(args.source, not args.no_pull)
+        elif args.command == 'status':
+            status()
+        elif args.command == 'publish':
+            publish(args.pages)
+        else:
+            follow(args.url)
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f'desos-dev: {" ".join(map(str, error.cmd))} failed ({error.returncode})') from None
+
+
+if __name__ == '__main__':
+    sys.exit(main())
