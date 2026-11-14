@@ -242,6 +242,46 @@ def primary_fingerprints(data):
 
 # --- Small parsers ----------------------------------------------------------
 
+def _order(char):
+    # dpkg's ordering of the non-digit parts: ~ before everything, even the end;
+    # letters before other characters.
+    if char == '~':
+        return -1
+    if char.isalpha():
+        return ord(char)
+    return ord(char) + 256
+
+
+def _compare_part(a, b):
+    while a or b:
+        while (a and not a[0].isdigit()) or (b and not b[0].isdigit()):
+            x = _order(a[0]) if a and not a[0].isdigit() else 0
+            y = _order(b[0]) if b and not b[0].isdigit() else 0
+            if x != y:
+                return -1 if x < y else 1
+            a, b = a[1:] if a and not a[0].isdigit() else a, b[1:] if b and not b[0].isdigit() else b
+        digits_a = re.match(r'\d*', a).group()
+        digits_b = re.match(r'\d*', b).group()
+        first = (int(digits_a or 0) > int(digits_b or 0)) - (int(digits_a or 0) < int(digits_b or 0))
+        if first:
+            return first
+        a, b = a[len(digits_a):], b[len(digits_b):]
+    return 0
+
+
+def compare_versions(a, b):
+    """Debian version comparison, as `dpkg --compare-versions`: -1, 0 or 1."""
+    def split(version):
+        epoch, _, rest = version.partition(':') if ':' in version else ('0', '', version)
+        upstream, _, revision = rest.rpartition('-') if '-' in rest else (rest, '', '0')
+        return int(epoch or 0), upstream, revision
+    ea, ua, ra = split(a)
+    eb, ub, rb = split(b)
+    if ea != eb:
+        return -1 if ea < eb else 1
+    return _compare_part(ua, ub) or _compare_part(ra, rb)
+
+
 def parse_stanzas(text):
     """Deb822 paragraphs as lists of (field, value) dictionaries; comments dropped."""
     stanzas = []
@@ -624,7 +664,7 @@ class Verifier:
             self.dpkg_status()
         except OSError as error:
             return self.add('packages.installed', UNKNOWN, 'dpkg status database is unreadable: %s' % error)
-        problems, versions, removed = [], {}, []
+        problems, versions, removed, upgraded = [], {}, [], []
         for entry in self.manifest['packages']:
             stanza = self.installed(entry['package'], entry.get('architecture'))
             if stanza is None and entry['package'] not in REQUIRED_PACKAGES:
@@ -633,28 +673,102 @@ class Verifier:
                 problems.append('%s is not installed' % entry['package'])
             elif stanza.get('status') != 'install ok installed':
                 problems.append('%s is in dpkg state "%s"' % (entry['package'], stanza.get('status')))
+            elif self.is_upgraded(entry, stanza):
+                upgraded.append({'package': entry['package'], 'shipped': entry['version'], 'installed': stanza.get('version')})
             elif stanza.get('version') != entry['version']:
                 problems.append('%s is at %s, manifest has %s' % (entry['package'], stanza.get('version'), entry['version']))
             versions[entry['package']] = stanza.get('version') if stanza else None
         if problems:
             return self.add('packages.installed', FAIL, '%d of %d DesOS packages differ from the manifest: %s' % (
-                len(problems), len(versions), '; '.join(problems[:3])), problems=shorten(problems), versions=versions)
+                len(problems), len(versions), '; '.join(problems[:3])), problems=shorten(problems), versions=versions,
+                upgraded=upgraded)
+        notes = []
+        if upgraded:
+            notes.append('%d upgraded since this image: %s' % (len(upgraded), ', '.join(
+                '%s %s' % (u['package'], u['installed']) for u in upgraded[:3])))
         if removed:
-            return self.add('packages.installed', PASS, '%d DesOS packages are at their manifest versions; '
-                            '%d optional removed: %s' % (len(versions) - len(removed), len(removed),
-                                                         ', '.join(removed[:3])), versions=versions, removed=removed)
+            notes.append('%d optional removed: %s' % (len(removed), ', '.join(removed[:3])))
+        if notes:
+            return self.add('packages.installed', PASS, '%d DesOS packages are at their manifest versions; %s'
+                            % (len(versions) - len(removed) - len(upgraded), '; '.join(notes)),
+                            versions=versions, removed=removed, upgraded=upgraded)
         self.add('packages.installed', PASS, 'all %d DesOS packages are installed at their manifest versions'
-                 % len(versions), versions=versions)
+                 % len(versions), versions=versions, removed=[], upgraded=[])
+
+    def is_upgraded(self, entry, stanza):
+        """Installed at a version newer than the one this image shipped."""
+        version = stanza.get('version') or ''
+        try:
+            return version != entry['version'] and compare_versions(version, entry['version']) > 0
+        except (ValueError, AttributeError):
+            return False
+
+    def md5sums(self, package):
+        """dpkg's own record of an installed package's files: {relative: md5}, or None."""
+        info = self.cfg.path('dpkg') / 'info'
+        for candidate in (package + '.md5sums', package + ':amd64.md5sums'):
+            if (info / candidate).is_file():
+                sums = {}
+                for line in read_text(info / candidate, limit=64 * 1024 * 1024).splitlines():
+                    digest, _, name = line.partition('  ')
+                    if name:
+                        sums[name] = digest
+                return sums
+        return None
+
+    def compare_md5sums(self, name, sums, diversions, report, patterns=None):
+        """An upgraded package's files against dpkg's MD5 record of the version now
+        installed: catches damage, not a forged record (the signed lists cover only
+        what this image shipped)."""
+        for relative, expected in sorted(sums.items()):
+            if patterns and not any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns):
+                continue
+            absolute = '/' + relative
+            target = absolute
+            if absolute in diversions and diversions[absolute][1] != name:
+                target = diversions[absolute][0]
+            try:
+                path = self.cfg.inroot(target, follow=False)
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode):
+                    report['modified'].append(absolute)
+                    continue
+                with open(path, 'rb') as stream:
+                    digest = hash_stream(stream, 'md5')
+            except FileNotFoundError:
+                report['missing'].append(absolute)
+                continue
+            except OSError as error:
+                report['unreadable'].append('%s (%s)' % (absolute, error.strerror))
+                continue
+            report['files'] += 1
+            report['bytes'] += info.st_size
+            if digest != expected:
+                report['modified'].append(absolute)
 
     def check_key_files(self):
         """Quick check: programs and units of the DesOS packages against the signed per-file lists."""
         if not self.need_manifest('packages.key-files'):
             return
         diversions = self.diversions()
-        problems, unknown, without, differs = [], [], [], []
+        problems, unknown, without, differs, upgraded = [], [], [], [], []
         checked = hashed = over_budget = 0
         for entry in self.manifest['packages']:
             name = entry['package']
+            stanza = self.installed(name, entry.get('architecture'))
+            if stanza is not None and self.is_upgraded(entry, stanza):
+                # Newer than this image: its signed list describes the old version, so
+                # compare with dpkg's record of the version installed instead.
+                sums = self.md5sums(name)
+                report = {'files': 0, 'bytes': 0, 'modified': [], 'missing': [], 'unreadable': []}
+                if sums is not None:
+                    self.compare_md5sums(name, sums, diversions, report, KEY_FILE_PATTERNS)
+                problems += ['%s %s: modified %s' % (name, stanza.get('version'), item) for item in report['modified']]
+                problems += ['%s %s: missing %s' % (name, stanza.get('version'), item) for item in report['missing']]
+                unknown += ['%s: unreadable %s' % (name, item) for item in report['unreadable']]
+                upgraded.append({'package': name, 'installed': stanza.get('version'), 'files': report['files'],
+                                 'method': 'MD5 against dpkg\'s record' if sums is not None else 'no dpkg record'})
+                continue
             files, problem = self.signed_list(entry)
             if problem:
                 problems.append(problem)
@@ -662,7 +776,6 @@ class Verifier:
             if files is None:
                 without.append(name)
                 continue
-            stanza = self.installed(name, entry.get('architecture'))
             if stanza is None:
                 continue                      # packages.installed says whether that matters
             if stanza.get('version') != entry['version']:
@@ -698,7 +811,7 @@ class Verifier:
         details = {'method': 'SHA-256 of each installed key file against the signed per-file list of its package',
                    'files': checked, 'bytes_hashed': hashed, 'patterns': list(KEY_FILE_PATTERNS),
                    'packages_without_list': without, 'other_version_installed': differs,
-                   'not_hashed_over_budget': over_budget}
+                   'upgraded': upgraded, 'not_hashed_over_budget': over_budget}
         if problems:
             return self.add('packages.key-files', FAIL, '%d key file problem(s): %s'
                             % (len(problems), '; '.join(problems[:3])), problems=shorten(problems), **details)
@@ -713,7 +826,7 @@ class Verifier:
             return self.add('packages.key-files', UNKNOWN, '%d key files match, but %d more were not hashed within the '
                             'quick check\'s %d MiB limit; the full check covers them'
                             % (checked, over_budget, QUICK_FILE_BUDGET >> 20), **details)
-        if not checked:
+        if not checked and not upgraded:
             return self.add('packages.key-files', UNKNOWN, 'no installed DesOS package at its manifest version has '
                             'programs or units to compare', **details)
         self.add('packages.key-files', PASS, '%d programs and units of the DesOS packages match their signed per-file '
@@ -832,10 +945,26 @@ class Verifier:
                 failed.append('%s: %s' % (name, reason))
                 per_package[name] = {'error': reason}
                 continue
-            if self.installed(name, entry.get('architecture')) is None:
+            stanza = self.installed(name, entry.get('architecture'))
+            if stanza is None:
                 per_package[name] = {'error': 'not installed'}
                 if name in REQUIRED_PACKAGES:
                     failed.append('%s: not installed' % name)
+                continue
+            if self.is_upgraded(entry, stanza):
+                # The signed package is the old version; check the new one against dpkg's record.
+                sums = self.md5sums(name)
+                if sums is None:
+                    unknown.append('%s %s: upgraded, and dpkg keeps no record of its files' % (name, stanza.get('version')))
+                    per_package[name] = {'upgraded_to': stanza.get('version'), 'error': 'no dpkg record'}
+                    continue
+                self.compare_md5sums(name, sums, diversions, report)
+                for key in ('modified', 'missing'):
+                    failed += ['%s %s: %s %s' % (name, stanza.get('version'), key, item) for item in report[key]]
+                unknown += ['%s: unreadable %s' % (name, item) for item in report['unreadable']]
+                per_package[name] = {k: (shorten(v) if isinstance(v, list) else v) for k, v in report.items()}
+                per_package[name].update(upgraded_to=stanza.get('version'), method='MD5 against dpkg\'s record',
+                                         seconds=round(time.monotonic() - started, 2))
                 continue
             try:
                 members = self.walk_deb(entry, deb)
@@ -1155,6 +1284,24 @@ class Verifier:
         if entry is None:
             return self.add('identity.os-release', UNKNOWN, 'os-release says %s, but no signed desos-release package '
                             'is available to compare it with' % values.get('PRETTY_NAME', 'DesOS'), **details)
+        stanza = self.installed('desos-release', entry.get('architecture'))
+        if stanza is not None and self.is_upgraded(entry, stanza):
+            # A newer desos-release from an update: the signed package is the old
+            # identity, so the file is compared with dpkg's record of the new one.
+            details.update(shipped=entry['version'], installed=stanza.get('version'))
+            recorded = self.recorded_md5('desos-release', 'usr/lib/os-release')
+            if recorded is None:
+                return self.add('identity.os-release', UNKNOWN, 'os-release says %s from desos-release %s, an upgrade '
+                                'dpkg keeps no record of' % (values.get('PRETTY_NAME', 'DesOS'), stanza.get('version')),
+                                **details)
+            with open(path, 'rb') as stream:
+                actual = hash_stream(stream, 'md5')
+            if actual != recorded:
+                return self.add('identity.os-release', FAIL, 'os-release says DesOS but is not the file of the installed '
+                                'desos-release %s' % stanza.get('version'), **details)
+            return self.add('identity.os-release', PASS, 'os-release is the %s identity from desos-release %s, upgraded '
+                            'from %s' % (values.get('PRETTY_NAME', 'DesOS'), stanza.get('version'), entry['version']),
+                            **details)
         listed, problem = (None, None) if self.full else self.signed_list(entry)
         if problem:
             return self.add('identity.os-release', FAIL, problem, **details)
