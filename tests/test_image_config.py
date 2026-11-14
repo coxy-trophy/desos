@@ -102,7 +102,7 @@ class ImageConfigurationTests(unittest.TestCase):
         self.assertIn('grub-set-default', selection)
         self.assertIn('-desos', selection)
 
-    def select(self, kernels, entries=None):
+    def select(self, kernels, entries=None, top=None):
         """Run the shipped hook against a fixture /boot with stand-in GRUB tools."""
         if not (self.root / 'usr/lib/desos/select-upstream-kernel').exists():
             write_configuration(self.root, self.parent)
@@ -114,7 +114,9 @@ class ImageConfigurationTests(unittest.TestCase):
         for name in kernels:
             (boot / ('vmlinuz-' + name)).write_text('image')
         listed = kernels if entries is None else entries
-        (boot / 'grub/grub.cfg').write_text("submenu 'Advanced' $menuentry_id_option 'gnulinux-advanced-UUID' {\n" + ''.join(
+        simple = '' if top is None else ("menuentry 'DesOS GNU/Linux' --class desos $menuentry_id_option 'gnulinux-simple-UUID' {\n"
+                                         "\tlinux\t/boot/vmlinuz-%s root=UUID=UUID ro quiet splash\n}\n" % top)
+        (boot / 'grub/grub.cfg').write_text(simple + "submenu 'Advanced' $menuentry_id_option 'gnulinux-advanced-UUID' {\n" + ''.join(
             "menuentry 'x' $menuentry_id_option 'gnulinux-%s-advanced-UUID' {\n}\n" % name for name in listed) + '}\n')
         (tools / 'grub-probe').write_text('#!/bin/sh\necho UUID\n')
         (tools / 'grub-set-default').write_text('#!/bin/sh\nprintf "%s" "$1" > "' + str(self.parent / 'default') + '"\n')
@@ -146,6 +148,33 @@ class ImageConfigurationTests(unittest.TestCase):
             hook = self.root / 'etc/kernel' / stage / 'zzzz-desos-select-kernel'
             self.assertIn('exec /usr/lib/desos/select-upstream-kernel', hook.read_text())
             self.assertGreater(hook.name, 'zz-update-grub')
+
+    def test_kernel_hook_prefers_the_top_entry_when_it_starts_the_desos_kernel(self):
+        # GRUB_TOP_LEVEL put the DesOS kernel on the first line: boot that line.
+        done, chosen = self.select(['6.18.62-desos', '7.0.0-43-generic'], top='6.18.62-desos')
+        self.assertEqual((done.returncode, chosen), (0, 'gnulinux-simple-UUID'), done.stderr)
+        # The top entry starts Ubuntu's kernel (or an older DesOS one): keep the exact entry.
+        for other in ('7.0.0-43-generic', '6.18.6-desos'):
+            with self.subTest(top=other):
+                done, chosen = self.select(['6.18.62-desos', '6.18.6-desos', '7.0.0-43-generic'], top=other)
+                self.assertEqual(chosen, 'gnulinux-advanced-UUID>gnulinux-6.18.62-desos-advanced-UUID')
+
+    def test_grub_defaults_put_the_newest_desos_kernel_on_top(self):
+        write_configuration(self.root, self.parent)
+        cfg = (self.root / 'etc/default/grub.d/10-desos.cfg').read_text()
+        self.assertIn('GRUB_DEFAULT=saved', cfg)
+        boot = self.parent / 'topboot'
+        boot.mkdir()
+        for name in ('6.18.9-desos', '6.18.62-desos', '7.0.0-43-generic'):
+            (boot / ('vmlinuz-' + name)).write_text('image')
+        shown = subprocess.run(['sh', '-c', cfg.replace('/boot/', str(boot) + '/') + '\nprintf %s "$GRUB_TOP_LEVEL"'],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, str(boot / 'vmlinuz-6.18.62-desos'))
+        empty = self.parent / 'noboot'
+        empty.mkdir()
+        shown = subprocess.run(['sh', '-c', cfg.replace('/boot/', str(empty) + '/') + '\nprintf %s "${GRUB_TOP_LEVEL-unset}"'],
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, 'unset')
 
     def test_kernel_hook_refuses_a_menu_without_the_new_kernel(self):
         done, chosen = self.select(['6.18.62-desos', '6.18.70-desos'], entries=['6.18.62-desos'])

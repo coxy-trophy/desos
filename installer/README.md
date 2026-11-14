@@ -110,8 +110,13 @@ This installer-only guard leaves normal package post-install behavior unchanged.
 The helper selects the discovered `*-desos` kernel using generated
 stable menu IDs and `grub-set-default`, while preserving Ubuntu's compatibility
 kernel as recovery. The image supplies `/etc/default/grub.d/10-desos.cfg` with
-`GRUB_DEFAULT=saved` and updates the choice after later kernel changes. This
-prevents a numerically higher Ubuntu kernel becoming the default. No kernel
+`GRUB_DEFAULT=saved` and `GRUB_TOP_LEVEL` set to the newest DesOS kernel, so
+the first menu line, "DesOS GNU/Linux", starts the DesOS kernel; the helper
+chooses that line, or the kernel's own entry under Advanced options if the top
+line starts something else. It updates the choice after later kernel changes.
+This prevents a numerically higher Ubuntu kernel becoming the default or taking
+the top line (on the first real install the menu opened on "Advanced options",
+and moving to the top line started Ubuntu's kernel). No kernel
 release is hardcoded here. `grubcfg` leaves integration files in
 `/etc/default/grub.d/` intact.
 

@@ -80,6 +80,15 @@ exec /usr/bin/des-ui-session "$@"
 # last), and from the installer. The newest installed -desos kernel by version
 # sort becomes the saved default, so a kernel upgrade delivered through
 # linux-image-desos is booted next and removing the old one re-selects.
+# Without this GRUB's top entry starts the highest-numbered kernel, Ubuntu's
+# compatibility kernel, and the DesOS kernel hides inside Advanced options.
+TOP_LEVEL = '''# The top "DesOS GNU/Linux" entry starts the newest DesOS kernel; Ubuntu's
+# kernel stays under Advanced options as the fallback.
+desos_kernel=$(ls /boot/vmlinuz-*-desos 2>/dev/null | sort -V | tail -n 1)
+[ -z "$desos_kernel" ] || GRUB_TOP_LEVEL=$desos_kernel
+unset desos_kernel
+'''
+
 SELECT_KERNEL = '''#!/usr/bin/python3
 import pathlib,subprocess,re
 boot=pathlib.Path('/boot');cfg=boot/'grub/grub.cfg'
@@ -92,7 +101,13 @@ submenu='gnulinux-advanced-'+uuid
 entry='gnulinux-'+version+'-advanced-'+uuid
 text=cfg.read_text()
 if entry not in text or submenu not in text:raise SystemExit('DesOS kernel menu ID missing from generated GRUB config')
-subprocess.run(['grub-set-default',submenu+'>'+entry],check=True)
+# GRUB_TOP_LEVEL (10-desos.cfg) puts this kernel in the top "DesOS GNU/Linux"
+# entry. Choose that entry when it really starts this kernel, so the menu opens
+# on the first line; otherwise the kernel's own entry inside Advanced options.
+simple='gnulinux-simple-'+uuid
+block=text.split("'"+simple+"'",1)[1].split('menuentry ',1)[0].split('submenu ',1)[0] if "'"+simple+"'" in text else ''
+top=re.search(r'\\blinux\\s+\\S*/vmlinuz-'+re.escape(version)+r'\\s',block)
+subprocess.run(['grub-set-default',simple if top else submenu+'>'+entry],check=True)
 print('Selected DesOS upstream kernel '+version)
 '''
 
@@ -147,7 +162,7 @@ user = "desos"
     put('etc/NetworkManager/conf.d/10-globally-managed-devices.conf', '# DesOS manages wired and wireless devices.\n')
     put('etc/NetworkManager/conf.d/20-desos.conf', '[main]\ndns=systemd-resolved\n[ifupdown]\nmanaged=true\n')
     put('etc/netplan/01-desos.yaml', 'network:\n  version: 2\n  renderer: NetworkManager\n', 0o600)
-    put('etc/default/grub.d/10-desos.cfg', 'GRUB_DISTRIBUTOR=DesOS\nGRUB_DEFAULT=saved\nGRUB_SAVEDEFAULT=false\nGRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n')
+    put('etc/default/grub.d/10-desos.cfg', 'GRUB_DISTRIBUTOR=DesOS\nGRUB_DEFAULT=saved\nGRUB_SAVEDEFAULT=false\nGRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n' + TOP_LEVEL)
     put('usr/lib/desos/select-upstream-kernel', SELECT_KERNEL, 0o755)
     put('etc/kernel/postinst.d/zzzz-desos-select-kernel', '#!/bin/sh\nset -e\nexec /usr/lib/desos/select-upstream-kernel\n', 0o755)
     put('etc/kernel/postrm.d/zzzz-desos-select-kernel', '#!/bin/sh\nset -e\nexec /usr/lib/desos/select-upstream-kernel\n', 0o755)

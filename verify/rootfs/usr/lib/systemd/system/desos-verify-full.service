@@ -16,7 +16,9 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes
 NoNewPrivileges=yes
-ProtectKernelModules=yes
+# No ProtectKernelModules: it hides /usr/lib/modules, and the check must hash the
+# DesOS kernel's module files. Loading modules stays impossible: the capability
+# bounding set below has no CAP_SYS_MODULE.
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH

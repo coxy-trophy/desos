@@ -26,7 +26,7 @@ except ImportError:
     import debpackage
 
 PACKAGE = 'desos-verify'
-VERSION = '2.2'
+VERSION = '2.3'
 EPOCH = 1794441600
 TREE = Path(__file__).resolve().parent.parent / 'verify/rootfs'
 

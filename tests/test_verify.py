@@ -1169,6 +1169,12 @@ class ComponentConventionTests(unittest.TestCase):
         for text in (quick, full):
             self.assertIn('ReadWritePaths=/run/desos /var/lib/desos', text)
             self.assertIn('PrivateNetwork=yes', text)
+            # The full check hashes /usr/lib/modules; ProtectKernelModules hides it
+            # and every module file reads as missing (seen on the first install).
+            lines = [l for l in text.splitlines() if not l.startswith('#')]
+            self.assertNotIn('ProtectKernelModules=yes', lines)
+            bounding = next(l for l in lines if l.startswith('CapabilityBoundingSet='))
+            self.assertNotIn('CAP_SYS_MODULE', bounding)
         self.assertIn('IOSchedulingClass=idle', full)
         self.assertIn('CPUSchedulingPolicy=idle', full)
         self.assertIn('Unit=desos-verify-full.service', (units / 'desos-verify-full.timer').read_text())
