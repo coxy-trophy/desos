@@ -73,11 +73,7 @@ wget
 less
 nano
 bash-completion
-thunar
-mousepad
-epiphany-browser
 evince
-ristretto
 fonts-dejavu-core
 fonts-noto-core
 fonts-noto-color-emoji
@@ -103,3 +99,30 @@ zstd
 xz-utils
 gzip
 cpio
+# Everyday applications. Brave and Visual Studio Code come from their makers'
+# repositories (image/vendor/). Files and the calculator are part of DEs-UI.
+brave-browser
+code
+vlc
+# Printing: CUPS, with driverless printing over the network and USB.
+cups
+ipp-usb
+# Archives, for DEs-UI Files' compress and extract.
+zip
+unzip
+7zip
+# Building DEs-UI on the machine itself (desos-dev update): the toolchain and
+# the libraries its build links against (des-ui/.github/workflows/ci.yml).
+git
+openssh-client
+build-essential
+pkg-config
+rustup
+libudev-dev
+libinput-dev
+libgbm-dev
+libseat-dev
+libxkbcommon-dev
+libssl-dev
+libwayland-dev
+libclang-dev

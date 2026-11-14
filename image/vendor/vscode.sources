@@ -1,0 +1,9 @@
+# Visual Studio Code, from Microsoft's own signed repository. The file has the
+# name and keyring the code package uses itself, so the package does not add a
+# second copy of this source.
+Types: deb
+URIs: https://packages.microsoft.com/repos/code
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/microsoft.gpg

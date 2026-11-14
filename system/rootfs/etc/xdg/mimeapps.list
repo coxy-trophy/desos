@@ -1,0 +1,32 @@
+# DesOS default applications. A user's own choice (~/.config/mimeapps.list)
+# always comes first.
+[Default Applications]
+x-scheme-handler/http=brave-browser.desktop
+x-scheme-handler/https=brave-browser.desktop
+x-scheme-handler/about=brave-browser.desktop
+x-scheme-handler/unknown=brave-browser.desktop
+text/html=brave-browser.desktop
+application/xhtml+xml=brave-browser.desktop
+inode/directory=des-files.desktop
+application/pdf=org.gnome.Evince.desktop
+image/png=brave-browser.desktop
+image/jpeg=brave-browser.desktop
+image/gif=brave-browser.desktop
+image/webp=brave-browser.desktop
+image/svg+xml=brave-browser.desktop
+text/plain=code.desktop
+text/markdown=code.desktop
+application/json=code.desktop
+application/x-shellscript=code.desktop
+video/mp4=vlc.desktop
+video/x-matroska=vlc.desktop
+video/webm=vlc.desktop
+video/quicktime=vlc.desktop
+video/x-msvideo=vlc.desktop
+video/mpeg=vlc.desktop
+audio/mpeg=vlc.desktop
+audio/flac=vlc.desktop
+audio/ogg=vlc.desktop
+audio/x-wav=vlc.desktop
+audio/mp4=vlc.desktop
+audio/aac=vlc.desktop

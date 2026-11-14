@@ -28,6 +28,11 @@ Suites: resolute-security
 Components: main universe restricted multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
+# Brave and Visual Studio Code come from their makers' signed repositories
+# (image/vendor/README.md). The installed system keeps these sources.
+install -d -m 755 "$root/usr/share/keyrings"
+install -m 644 "$here"/vendor/keyrings/*.gpg "$root/usr/share/keyrings/"
+install -m 644 "$here"/vendor/*.sources "$root/etc/apt/sources.list.d/"
 if [[ -L $root/etc/resolv.conf ]]; then unlink "$root/etc/resolv.conf"; fi
 cp -L /etc/resolv.conf "$root/etc/resolv.conf"
 printf '#!/bin/sh\nexit 101\n' > "$root/usr/sbin/policy-rc.d"
@@ -38,6 +43,8 @@ mount --make-rslave "$root/sys"
 mountpoint -q "$root/dev" || mount --rbind /dev "$root/dev"
 mount --make-rslave "$root/dev"
 export DEBIAN_FRONTEND=noninteractive
+# The code package would otherwise write its own copy of vscode.sources.
+echo 'code code/add-microsoft-repo boolean false' | chroot "$root" debconf-set-selections
 chroot "$root" apt-get -o DPkg::Lock::Timeout=300 update
 mapfile -t packages < <(grep -Ev '^\s*(#|$)' "$here/packages.list")
 # Reviewed component trees (system/, undo/, ...) add their own packages/units.
