@@ -261,7 +261,12 @@ class ConfigurationTests(unittest.TestCase):
             selector.chmod(0o755)
             # Run the actual Calamares shell fragment, relocating only its two
             # target paths into the fixture; no host /boot or chroot is touched.
-            command = final["script"].replace("/boot/grub/grub.cfg", str(grub)).replace("/usr/lib/desos/select-upstream-kernel", str(selector))
+            kernels = root / "boot"
+            kernels.mkdir()
+            command = (final["script"].replace("/boot/grub/grub.cfg", str(grub))
+                       .replace("/usr/lib/desos/select-upstream-kernel", str(selector))
+                       .replace("/boot/vmlinuz-* /boot/initrd.img-*", f"{kernels}/vmlinuz-* {kernels}/initrd.img-*"))
+            self.assertNotIn(" /boot/", command.replace(str(kernels), "FIXTURE"), "the fragment must not reach the host /boot")
             missing = subprocess.run(["/bin/sh", "-c", command], capture_output=True)
             self.assertNotEqual(missing.returncode, 0)
             self.assertFalse(called.exists())
@@ -270,9 +275,19 @@ class ConfigurationTests(unittest.TestCase):
             self.assertNotEqual(empty.returncode, 0)
             self.assertFalse(called.exists())
             grub.write_text("menuentry DesOS {}\n")
+            kernel = kernels / "vmlinuz-6.18.62-desos"
+            kernel.write_bytes(b"MZ" + bytes(8192) + b"kernel")
+            kernel.chmod(0o640)
+            (kernels / "initrd.img-6.18.62-desos").write_bytes(b"initrd")
+            (kernels / "vmlinuz").symlink_to(kernel.name)
             valid = subprocess.run(["/bin/sh", "-c", command], capture_output=True)
-            self.assertEqual(valid.returncode, 0)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
             self.assertTrue(called.exists())
+            # Kernels and initrds are rewritten in place: same bytes and mode, no leftovers.
+            self.assertEqual(kernel.read_bytes(), b"MZ" + bytes(8192) + b"kernel")
+            self.assertEqual(kernel.stat().st_mode & 0o777, 0o640)
+            self.assertTrue((kernels / "vmlinuz").is_symlink())
+            self.assertEqual(sorted(p.name for p in kernels.iterdir()), ["initrd.img-6.18.62-desos", "vmlinuz", "vmlinuz-6.18.62-desos"])
             selector.write_text("#!/bin/sh\nexit 23\n")
             failed = subprocess.run(["/bin/sh", "-c", command], capture_output=True)
             self.assertEqual(failed.returncode, 23)
