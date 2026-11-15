@@ -98,7 +98,13 @@ def update(source, pull):
         say('note: building uncommitted changes too')
     say(f'building DEs-UI {version} (the first build takes a while)')
     env = dict(os.environ, DESUI_DEB_VERSION=version)
-    run(['sh', 'packaging/build-deb.sh'], cwd=source, env=env)
+    try:
+        run(['sh', 'packaging/build-deb.sh'], cwd=source, env=env)
+    except subprocess.CalledProcessError as error:
+        # The real error sits above hundreds of compiler warnings; say plainly
+        # that the build stopped and that nothing changed.
+        raise SystemExit(f'desos-dev: the DEs-UI build failed (exit {error.returncode}); nothing was '
+                         'installed. The error is the last lines before this one that are not warnings.') from None
     debs = sorted(str(p) for p in (source / 'target/deb').glob(f'*_{version}_*.deb'))
     if not debs:
         raise SystemExit('desos-dev: the build made no packages')

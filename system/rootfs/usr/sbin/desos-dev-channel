@@ -30,6 +30,18 @@ GNUPG = BASE / 'gnupg'
 CHANNEL = BASE / 'channel'
 KEYRING = Path('/usr/share/keyrings/desos-dev.gpg')
 SOURCE = Path('/etc/apt/sources.list.d/desos-dev.sources')
+PIN = Path('/etc/apt/preferences.d/desos-dev')
+# The shipped DesOS repository pins DEs-UI at 990 (preferences.d/desos), which
+# beats the default 500 even for older versions: a channel left at 500 is never
+# chosen. At the same 990 apt takes the higher version, so a dev build replaces
+# the shipped one and a later official release (a higher version) replaces it.
+# Covers this channel and a followed published copy: both are "DesOS developer".
+PIN_TEXT = '''Explanation: DEs-UI built by desos-dev competes with the shipped DesOS repository
+Explanation: on version alone (both 990); see /etc/apt/preferences.d/desos.
+Package: des-ui des-ui-*
+Pin: release o=DesOS developer
+Pin-Priority: 990
+'''
 # Only DEs-UI's own packages may enter the channel.
 PACKAGE = re.compile(r'^(des-ui(?:-music|-greeter|-plymouth)?)_([0-9][A-Za-z0-9.+~-]*)_(amd64|all)\.deb$')
 KEEP = 3
@@ -68,6 +80,7 @@ def init():
     exported = gpg('--export', key, capture_output=True).stdout
     write(KEYRING, exported, 0o644)
     write(SOURCE, source_text().encode(), 0o644)
+    write(PIN, PIN_TEXT.encode(), 0o644)
     index()
     return key
 

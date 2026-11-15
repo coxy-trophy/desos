@@ -55,6 +55,21 @@ class ChannelTests(unittest.TestCase):
         self.assertIn('Suites: ./\n', text)
         self.assertIn('Signed-By: /usr/share/keyrings/desos-dev.gpg\n', text)
 
+    def test_channel_is_pinned_like_the_shipped_repository(self):
+        # The shipped repo pins DEs-UI at 990; a channel at the default 500 was
+        # never chosen, so the first dev update on real hardware installed nothing.
+        import re
+        shipped = (Path(__file__).resolve().parents[1] / 'image/configure.py').read_text()
+        priority = re.search(r'Pin: release o=DesOS\nPin-Priority: (\d+)', shipped).group(1)
+        self.assertEqual(str(channel.PIN), '/etc/apt/preferences.d/desos-dev')
+        self.assertIn('Package: des-ui des-ui-*\n', channel.PIN_TEXT)
+        self.assertIn('Pin-Priority: %s\n' % priority, channel.PIN_TEXT)
+        # The origin the pin names is the one the channel's Release file carries.
+        origin = re.search(r'Pin: release o=(.+)\n', channel.PIN_TEXT).group(1)
+        source = (TREE / 'usr/sbin/desos-dev-channel').read_text()
+        self.assertEqual(source.count("Release::Origin=%s'" % origin), 2)
+        self.assertIn('write(PIN, PIN_TEXT.encode(), 0o644)', source)
+
     def test_only_des_ui_packages_are_accepted(self):
         for good in ('des-ui_0.2.0+dev202611140930.gabc_amd64.deb', 'des-ui-music_0.2.0_amd64.deb'):
             self.assertTrue(channel.PACKAGE.match(good), good)
