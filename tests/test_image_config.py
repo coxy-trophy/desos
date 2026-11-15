@@ -176,6 +176,16 @@ class ImageConfigurationTests(unittest.TestCase):
                                capture_output=True, text=True, check=True).stdout
         self.assertEqual(shown, 'unset')
 
+    def test_grub_defaults_add_splash_without_dropping_resume(self):
+        write_configuration(self.root, self.parent)
+        cfg = (self.root / 'etc/default/grub.d/10-desos.cfg').read_text()
+        self.assertNotIn('GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"', cfg)
+        for start, want in (('', 'quiet splash'), ('quiet resume=UUID=abc', 'quiet resume=UUID=abc splash'),
+                            ('quiet splash resume=UUID=abc', 'quiet splash resume=UUID=abc')):
+            shown = subprocess.run(['sh', '-c', 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n%s\nprintf %%s "$GRUB_CMDLINE_LINUX_DEFAULT"' % (start, cfg)],
+                                   capture_output=True, text=True, check=True).stdout
+            self.assertEqual(shown, want)
+
     def test_kernel_hook_refuses_a_menu_without_the_new_kernel(self):
         done, chosen = self.select(['6.18.62-desos', '6.18.70-desos'], entries=['6.18.62-desos'])
         self.assertNotEqual(done.returncode, 0)

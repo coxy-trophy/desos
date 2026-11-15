@@ -124,8 +124,15 @@ release is hardcoded here. `grubcfg` leaves integration files in
 
 The preview supports the empty-disk ext4 installation path on x86-64 BIOS and
 UEFI. It requires at least 16 GiB available disk and 2 GiB RAM; use a 24–32 GiB
-or larger disposable VM disk for verification. Automatic encryption, LVM and
-swap are disabled pending dedicated unlock/suspend tests. Manual partitioning
+or larger disposable VM disk for verification. "Erase disk" opens selected:
+it makes the EFI partition and root itself (the first real install was
+partitioned by hand because no swap could be asked for). Swap is a choice:
+none (zram only, the default), a small swap partition, or one the size of RAM
+for hibernation, passed to the kernel as `resume=` (10-desos.cfg adds `splash`
+without replacing the command line). There is no swap-file choice: an active
+swap file in `@` stops btrfs snapshotting it. Hibernation has not yet been
+tested on hardware. Automatic encryption and LVM are disabled pending
+dedicated unlock tests. Manual partitioning
 remains available; Calamares may offer Alongside/Replace on populated disks,
 because 3.3.14 has no supported filtering key for these choices. Those paths
 are outside the current acceptance scope. Never claim existing-OS preservation

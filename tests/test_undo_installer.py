@@ -31,11 +31,14 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(partition['defaultFileSystemType'], 'btrfs')
         self.assertEqual(partition['availableFileSystemTypes'], ['btrfs', 'ext4'])
         self.assertTrue(partition['allowManualPartitioning'])
-        # Nothing is selected or erased without the user's explicit choice.
-        self.assertEqual(partition['initialPartitioningChoice'], 'none')
+        # Erase disk opens selected (it makes EFI and root itself); the
+        # summary's Install now is still the explicit choice that writes.
+        self.assertEqual(partition['initialPartitioningChoice'], 'erase')
         self.assertFalse(partition['enableLuksAutomatedPartitioning'])
         self.assertFalse(partition['lvm']['enable'])
-        self.assertEqual(partition['userSwapChoices'], ['none'])
+        # No swap file: an active one in @ would stop btrfs snapshotting it.
+        self.assertEqual(partition['userSwapChoices'], ['none', 'small', 'suspend'])
+        self.assertEqual(partition['initialSwapChoice'], 'none')
 
     def test_layout_follows_the_chosen_filesystem_and_keeps_boot_inside_root(self):
         layout = conf('partition')['partitionLayout']

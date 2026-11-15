@@ -80,6 +80,14 @@ exec /usr/bin/des-ui-session "$@"
 # last), and from the installer. The newest installed -desos kernel by version
 # sort becomes the saved default, so a kernel upgrade delivered through
 # linux-image-desos is booted next and removing the old one re-selects.
+# Adds splash to the command line without replacing it: replacing it dropped the
+# resume= the installer writes for a hibernation swap partition.
+SPLASH = '''case " $GRUB_CMDLINE_LINUX_DEFAULT " in
+    *" splash "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:-quiet} splash" ;;
+esac
+'''
+
 # Without this GRUB's top entry starts the highest-numbered kernel, Ubuntu's
 # compatibility kernel, and the DesOS kernel hides inside Advanced options.
 TOP_LEVEL = '''# The top "DesOS GNU/Linux" entry starts the newest DesOS kernel; Ubuntu's
@@ -162,7 +170,7 @@ user = "desos"
     put('etc/NetworkManager/conf.d/10-globally-managed-devices.conf', '# DesOS manages wired and wireless devices.\n')
     put('etc/NetworkManager/conf.d/20-desos.conf', '[main]\ndns=systemd-resolved\n[ifupdown]\nmanaged=true\n')
     put('etc/netplan/01-desos.yaml', 'network:\n  version: 2\n  renderer: NetworkManager\n', 0o600)
-    put('etc/default/grub.d/10-desos.cfg', 'GRUB_DISTRIBUTOR=DesOS\nGRUB_DEFAULT=saved\nGRUB_SAVEDEFAULT=false\nGRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n' + TOP_LEVEL)
+    put('etc/default/grub.d/10-desos.cfg', 'GRUB_DISTRIBUTOR=DesOS\nGRUB_DEFAULT=saved\nGRUB_SAVEDEFAULT=false\nGRUB_TIMEOUT=5\n' + SPLASH + TOP_LEVEL)
     put('usr/lib/desos/select-upstream-kernel', SELECT_KERNEL, 0o755)
     put('etc/kernel/postinst.d/zzzz-desos-select-kernel', '#!/bin/sh\nset -e\nexec /usr/lib/desos/select-upstream-kernel\n', 0o755)
     put('etc/kernel/postrm.d/zzzz-desos-select-kernel', '#!/bin/sh\nset -e\nexec /usr/lib/desos/select-upstream-kernel\n', 0o755)

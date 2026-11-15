@@ -238,7 +238,9 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(settings["prompt-install"])
         self.assertFalse(settings["dont-chroot"])
         partition = yaml.safe_load((BASE / "calamares/modules/partition.conf").read_text())
-        self.assertEqual(partition["initialPartitioningChoice"], "none")
+        # Erase disk is preselected so nobody has to partition by hand; the summary still asks.
+        self.assertEqual(partition["initialPartitioningChoice"], "erase")
+        self.assertTrue(settings["prompt-install"])
         self.assertFalse(partition["enableLuksAutomatedPartitioning"])
         # btrfs by default for desos-undo; ext4 stays selectable (tests/test_undo_installer.py).
         self.assertEqual(partition["defaultFileSystemType"], "btrfs")
