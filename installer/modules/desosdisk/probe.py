@@ -1,8 +1,15 @@
 """What the disk page shows: the disks DesOS may go on, the memory, the
-firmware, and the systems already on each disk. Pure parsing of command
-output, so it is tested without hardware (tests/test_desosdisk.py); probejob.py
-runs the commands and puts the result in Calamares' global storage.
+firmware, and the systems already on each disk. The parsing is pure and tested
+without hardware (tests/test_desosdisk.py). collect() runs the commands; the
+installer launcher runs this file before Calamares starts and writes the result
+to /run/desos-installer/disks.json, which the disk page reads. (A Calamares job
+before the first page would put two extra steps in the rail.)
 """
+import json
+import os
+import subprocess
+import sys
+
 from plan import MIN_ROOT, EFI_SIZE
 
 LSBLK = ["lsblk", "--json", "--bytes", "--output",
@@ -45,10 +52,10 @@ def disks(lsblk, found_systems=None):
         tree = list(_walk(node))
         mounts = [m for n in tree for m in _mounts(n)]
         reason = None
-        if node.get("ro"):
-            reason = "read-only"
-        elif any(m.startswith(LIVE_MOUNTS) for m in mounts):
+        if any(m.startswith(LIVE_MOUNTS) for m in mounts):
             reason = "the DesOS USB, in use"
+        elif node.get("ro"):
+            reason = "read-only"
         elif int(node.get("size") or 0) < MIN_ROOT + EFI_SIZE + 2 * 1024 ** 2:
             reason = f"smaller than {(MIN_ROOT + EFI_SIZE) / 1e9:.0f} GB"
         partitions = []
@@ -105,3 +112,26 @@ def describe(disk):
     elif disk["empty"]:
         parts.append("empty")
     return " · ".join(parts)
+
+
+def firmware():
+    return "efi" if os.path.isdir("/sys/firmware/efi") else "bios"
+
+
+def collect():
+    """Reads the machine: disks (with os-prober's findings), memory, firmware."""
+    lsblk = json.loads(subprocess.run(LSBLK, capture_output=True, text=True, check=True).stdout)
+    try:
+        found = subprocess.run(["os-prober"], capture_output=True, text=True, timeout=120).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        found = ""
+    with open("/proc/meminfo") as meminfo:
+        memory = memory_bytes(meminfo.read())
+    offered = disks(lsblk, systems(found))
+    for disk in offered:
+        disk["line"] = describe(disk)
+    return {"disks": offered, "memory": memory, "firmware": firmware()}
+
+
+if __name__ == "__main__":
+    json.dump(collect(), sys.stdout)

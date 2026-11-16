@@ -169,19 +169,32 @@ The first real install was partitioned by hand: Calamares's page offered no
 swap and manual mode does not add the EFI partition. The disk page is now
 DesOS's own (design: the installer flow canvas, "Disk, step 2").
 
-- `desosdiskprobe` runs before the first page. It reads the disks (lsblk),
-  the systems on them (os-prober), the memory and the firmware, and puts them
-  in global storage. It writes nothing.
-- `desosdisk.qml` shows the disks, biggest usable first, and three choices:
+- The launcher (`desos-installer-helper`, as root) runs
+  `modules/desosdisk/probe.py` just before Calamares starts. It reads the
+  disks (lsblk), the systems on them (os-prober), the memory and the firmware
+  into `/run/desos-installer/disks.json`. It writes nothing else. (A Calamares
+  job before the first page would add two steps to the rail; the first VM
+  run showed them.)
+- `desosdisk.qml` reads that file (the one local read its tests allow, with
+  `QML_XHR_ALLOW_FILE_READ` set by the launcher) and shows the disks, biggest usable first, and three choices:
   file system (btrfs with undo, the default, or ext4), swap (none, a small
   partition, or one the size of RAM for hibernation) and a separate /home
-  partition with a size. A bar shows the disk now and after. It writes only
-  `desosDiskChoice`.
+  partition with a size. A bar shows the disk now and after, and one amber
+  line says which disk is erased when Install is pressed (Calamares's summary
+  page lists only its own pages, so it does not mention the disk). It writes
+  only `/run/desos-installer/choice.json`: QML can read Calamares's global
+  storage in 3.3.14 but not write it (`insert` is not callable), and a
+  synchronous file write left the file empty, so the write is asynchronous
+  (both found in the first VM runs). The launcher removes any old choice at
+  start and sets `QML_XHR_ALLOW_FILE_WRITE`.
 - `desosdisk` runs where Calamares's partition job ran. It reads the disks
   again, refuses any disk the probe would not offer (the live USB, read-only
   or too small), makes the plan with `modules/desosdisk/plan.py`, writes it
   with sfdisk and mkfs, and describes the result in the partition module's
-  own format for mount, fstab, bootloader and grubcfg.
+  own format for mount, fstab, bootloader and grubcfg. Ubuntu's bootloader job
+  runs unchanged through `modules/desosbootloader`, because the packaged one
+  declares that it needs the partition module and Calamares refuses to start
+  without it.
 
 The sizes are computed in Python and drawn in QML from the same constants; a
 test keeps them equal. Every layout the planner can make is tested
@@ -193,7 +206,8 @@ when asked, so that entry starts Calamares with
 `installer/calamares-manual/` first in `XDG_CONFIG_DIRS`, the same steps with
 Calamares's partition page and job in place of the disk page.
 
-Not yet built: "Reinstall, keep my files" (the mount job would recreate the
+Not yet built: a Review page in place of Calamares's summary, with the erase
+spelled out (the installer flow canvas, "6 · Review"); "Reinstall, keep my files" (the mount job would recreate the
 existing `@home` subvolume and fail), and fixing a missing EFI partition from
 inside manual mode.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 """Fixed-command live installer elevation; never a general root wrapper."""
 import argparse
+import json
 import os
 from pathlib import Path
 import pwd
@@ -68,6 +69,25 @@ def display_environment(uid, display, wayland, xauthority):
 
 
 MANUAL_CONFIG = "/usr/share/desos/calamares-manual"
+PROBE = "/usr/lib/desos/calamares/modules/desosdisk/probe.py"
+PROBED = Path("/run/desos-installer/disks.json")
+CHOICE = Path("/run/desos-installer/choice.json")
+
+
+def probe_disks(env):
+    """What the disk page shows, read now as root (lsblk, os-prober), into a
+    root-owned file the page reads. Nothing is written to any disk."""
+    PROBED.parent.mkdir(mode=0o755, exist_ok=True)
+    os.chmod(PROBED.parent, 0o755)
+    # A choice from an earlier run must never be used: the page writes a new one.
+    CHOICE.unlink(missing_ok=True)
+    found = subprocess.run(["/usr/bin/python3", "-E", "-s", PROBE], env=env, capture_output=True,
+                           text=True, timeout=180, check=True).stdout
+    json.loads(found)  # refuse anything that is not the probe's JSON
+    temporary = PROBED.with_suffix(".new")
+    temporary.write_text(found)
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, PROBED)
 
 
 def main():
@@ -106,6 +126,12 @@ def main():
         env["XDG_CONFIG_DIRS"] = f"{MANUAL_CONFIG}:/etc"
         os.execve("/usr/bin/calamares", ["calamares", "--xdg-config"], env)
     else:
+        probe_disks(base_environment())
+        # The disk page reads PROBED and writes CHOICE with XMLHttpRequest,
+        # which Qt allows for local files only with these set. Calamares loads
+        # only root-owned QML (the DesOS branding), so this reaches no other code.
+        env["QML_XHR_ALLOW_FILE_READ"] = "1"
+        env["QML_XHR_ALLOW_FILE_WRITE"] = "1"
         os.execve("/usr/bin/calamares", ["calamares"], env)
 
 

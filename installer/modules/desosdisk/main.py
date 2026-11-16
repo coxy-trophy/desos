@@ -16,8 +16,18 @@ import plan  # noqa: E402
 import probe  # noqa: E402
 
 
+CHOICE = "/run/desos-installer/choice.json"
+
+
 def choice():
-    return libcalamares.globalstorage.value("desosDiskChoice") or {}
+    """What the disk page chose (desosdisk.qml writes it; QML cannot write
+    Calamares's global storage in 3.3.14)."""
+    try:
+        with open(CHOICE) as handle:
+            picked = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return picked if isinstance(picked, dict) else {}
 
 
 def pretty_name():
@@ -45,10 +55,13 @@ def run():
         gs = libcalamares.globalstorage
         lsblk = json.loads(subprocess.run(probe.LSBLK, capture_output=True, text=True, check=True).stdout)
         disk = apply.refuse_unsafe(picked.get("disk", ""), probe.disks(lsblk))
-        firmware = gs.value("firmwareType")
+        firmware = probe.firmware()
+        with open("/proc/meminfo") as meminfo:
+            memory = probe.memory_bytes(meminfo.read())
+        gs.insert("firmwareType", firmware)
         choices = plan.Choices(filesystem=picked.get("filesystem", "btrfs"), swap=picked.get("swap", "none"),
                                home_bytes=int(picked.get("homeBytes", 0)))
-        parts = plan.plan(disk["size"], gs.value("desosMemory"), firmware, choices, disk["sector"])
+        parts = plan.plan(disk["size"], memory, firmware, choices, disk["sector"])
         script = plan.sfdisk_script(parts, disk["sector"])
         libcalamares.utils.debug("desosdisk plan:\n" + script)
         steps = apply.commands(disk["path"], parts, script, [p["path"] for p in disk["partitions"]])

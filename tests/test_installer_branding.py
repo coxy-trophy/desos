@@ -410,17 +410,25 @@ class QmlTests(unittest.TestCase):
         # Exactly the modules the sidebar embedded in the 3.3.14 binary imports.
         self.assertEqual(imports["calamares-sidebar.qml"],
                          ["io.calamares.ui 1.0", "io.calamares.core 1.0", "QtQuick 2.15"])
-        # The disk page reads and writes Global storage; nothing else.
-        self.assertEqual(imports["desosdisk.qml"], ["io.calamares.core 1.0", "QtQuick 2.15"])
+        # The disk page needs nothing from Calamares: it reads the launcher's
+        # probe file and writes its choice file (QML cannot write global storage).
+        self.assertEqual(imports["desosdisk.qml"], ["QtQuick 2.15"])
 
     def test_nothing_remote_no_images_and_no_busy_motion(self):
         for name, (code, strings) in self.code.items():
             with self.subTest(name=name):
+                # The disk page reads one local, root-owned file: the launcher's probe.
+                if name == "desosdisk.qml":
+                    self.assertEqual([s for s in strings if "://" in s],
+                                     ["file:///run/desos-installer/choice.json", "file:///run/desos-installer/disks.json"])
+                    code = code.replace("XMLHttpRequest", "")
                 for forbidden in ("Image", "AnimatedImage", "Loader", "XMLHttpRequest", "WebSocket", "openUrlExternally",
                                   "FontLoader", "Canvas", "ShaderEffect", "ParticleSystem", "Animation.Infinite",
                                   "RotationAnimation", "PathAnimation"):
                     self.assertNotRegex(code, rf"\b{re.escape(forbidden)}\b")
                 for string in strings:
+                    if name == "desosdisk.qml" and string.startswith("file:///run/desos-installer/"):
+                        continue
                     self.assertNotRegex(string, r"://|\.svg|\.png|www\.")
                 for interval in re.findall(r"interval:\s*(\d+)", code):
                     self.assertGreaterEqual(int(interval), 10000, "timers must be slow")

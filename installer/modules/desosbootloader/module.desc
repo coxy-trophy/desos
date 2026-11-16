@@ -1,6 +1,5 @@
 ---
 type: job
 interface: python
-name: desosdiskprobe
+name: desosbootloader
 script: main.py
-noconfig: true

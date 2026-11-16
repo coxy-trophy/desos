@@ -1,8 +1,10 @@
 /* DesOS disk page (the "desosdisk" notesqml instance; design: the installer
  * flow canvas, "Disk, step 2").
  *
- * Reads what desosdiskprobe found (Global "desosDisks", "desosMemory",
- * "firmwareType") and writes the user's choice to Global "desosDiskChoice":
+ * Reads what the launcher found before Calamares started
+ * (/run/desos-installer/disks.json: disks, memory, firmware; see
+ * modules/desosdisk/probe.py) and writes the user's choice to
+ * /run/desos-installer/choice.json:
  *   { mode: "erase", disk: "/dev/sda", filesystem: "btrfs"|"ext4",
  *     swap: "none"|"small"|"suspend", homeBytes: <bytes, 0 = none> }
  * The desosdisk job turns that into partitions with plan.py; the numbers drawn
@@ -12,8 +14,6 @@
  *
  * Palette as calamares-sidebar.qml; no Image elements.
  */
-import io.calamares.core 1.0
-
 import QtQuick 2.15
 
 Rectangle {
@@ -66,20 +66,47 @@ Rectangle {
 
     function gb(bytes) { return (bytes / 1e9).toFixed(bytes >= 100e9 ? 0 : 1) + " GB" }
 
+    // Calamares 3.3.14 lets QML read global storage but not write it, so the
+    // choice goes to a local file the desosdisk job reads (the launcher removes
+    // any old one at start and sets QML_XHR_ALLOW_FILE_WRITE).
+    // Asynchronous: Qt sends the body of a file PUT only from its event loop
+    // (a synchronous PUT made the file and left it empty in the first VM run).
+    // The request is kept in a property so it is not collected mid-write.
+    property var writing: null
     function save() {
-        Global.insert("desosDiskChoice", {
+        var request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState === XMLHttpRequest.DONE)
+                console.log("desosdisk: choice saved, status " + request.status)
+        }
+        request.open("PUT", "file:///run/desos-installer/choice.json")
+        request.send(JSON.stringify({
             "mode": "erase",
             "disk": fits ? disk.path : "",
             "filesystem": filesystem,
             "swap": swap,
             "homeBytes": homeBytes
-        })
+        }))
+        writing = request
+    }
+
+    // The launcher's probe: a local, root-owned file (QML_XHR_ALLOW_FILE_READ).
+    function readProbe() {
+        var request = new XMLHttpRequest()
+        request.open("GET", "file:///run/desos-installer/disks.json", false)
+        request.send(null)
+        try {
+            var found = JSON.parse(request.responseText)
+            disks = found.disks || []
+            memory = found.memory || 0
+            firmware = found.firmware || "efi"
+        } catch (error) {
+            disks = []
+        }
     }
 
     function onActivate() {
-        disks = Global.value("desosDisks") || []
-        memory = Global.value("desosMemory") || 0
-        firmware = Global.value("firmwareType") || "efi"
+        if (disks.length === 0) readProbe()
         if (picked < 0) {
             for (var i = 0; i < disks.length; ++i) {
                 if (disks[i].usable) { picked = i; break }
@@ -278,7 +305,7 @@ Rectangle {
                             width: parent.width; height: 34
                             visible: page.separateHome && page.homeFits
                             Text { text: "Size"; color: pal.secondary; font.family: "Chakra Petch"; font.pixelSize: 12 }
-                            Text { anchors.right: parent.right; text: Math.round(page.homeBytes / page.gib) + " GiB"; color: pal.text; font.family: "JetBrains Mono"; font.pixelSize: 12 }
+                            Text { anchors.right: parent.right; text: page.gb(page.homeBytes); color: pal.text; font.family: "JetBrains Mono"; font.pixelSize: 12 }
                             Rectangle {
                                 id: groove
                                 y: 22; width: parent.width; height: 4; radius: 2; color: pal.track
@@ -292,7 +319,7 @@ Rectangle {
                                 }
                                 activeFocusOnTab: true
                                 Accessible.role: Accessible.Slider
-                                Accessible.name: "Size of the /home partition in GiB"
+                                Accessible.name: "Size of the /home partition"
                                 Keys.onLeftPressed: page.homeGib = Math.max(page.minHomeGib, Math.round(page.homeBytes / page.gib) - 5)
                                 Keys.onRightPressed: page.homeGib = Math.min(page.largestHomeGib, Math.round(page.homeBytes / page.gib) + 5)
                                 MouseArea {
@@ -356,7 +383,7 @@ Rectangle {
                             }
                             Rectangle {
                                 visible: page.swapBytes > 0
-                                width: Math.max(40, bar.room * page.swapBytes / bar.total); height: 28; radius: 4; color: pal.track; clip: true
+                                width: Math.max(96, bar.room * page.swapBytes / bar.total); height: 28; radius: 4; color: pal.track; clip: true
                                 Text { anchors.verticalCenter: parent.verticalCenter; x: 8; text: "SWAP " + page.gb(page.swapBytes); color: pal.secondary; font.family: "JetBrains Mono"; font.pixelSize: 10; font.letterSpacing: 0.8 }
                             }
                             Rectangle {
@@ -373,6 +400,17 @@ Rectangle {
                 }
             }
 
+            // The erase, in words, at the moment of choosing: Calamares's summary
+            // page lists only its own pages' sections, so it says nothing of this.
+            Note {
+                width: parent.width
+                visible: page.disk !== null && page.fits
+                text: page.disk ? ("When you press Install, everything on " + page.disk.path.replace("/dev/", "")
+                    + " (" + page.gb(page.disk.size) + (page.disk.systems.length ? ", " + page.disk.systems.join(" and ") : "")
+                    + ") is erased. Nothing is written before that.") : ""
+                color: pal.caution
+                font.pixelSize: 14
+            }
             Note {
                 width: parent.width
                 visible: page.disk !== null && !page.fits

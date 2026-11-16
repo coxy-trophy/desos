@@ -215,10 +215,17 @@ class LauncherTests(unittest.TestCase):
              patch.object(self.helper, "display_environment", return_value={"QT_QPA_PLATFORM": "wayland"}), \
              patch.object(self.helper.os, "chdir"), \
              patch.object(self.helper.os, "umask"), \
+             patch.object(self.helper, "probe_disks") as probe, \
              patch.object(self.helper.os, "execve") as execute:
             self.helper.main()
         self.assertEqual(execute.call_args.args[0:2], ("/usr/bin/calamares", ["calamares"]))
         self.assertNotIn("XDG_CONFIG_DIRS", execute.call_args.args[2])
+        # The disk page's probe runs first, as root, and the page may read its file.
+        probe.assert_called_once()
+        self.assertEqual(execute.call_args.args[2]["QML_XHR_ALLOW_FILE_READ"], "1")
+        self.assertEqual(execute.call_args.args[2]["QML_XHR_ALLOW_FILE_WRITE"], "1")
+        self.assertEqual(str(self.helper.CHOICE), "/run/desos-installer/choice.json")
+        self.assertEqual(str(self.helper.PROBED), "/run/desos-installer/disks.json")
 
     def test_manual_mode_switches_only_to_the_fixed_manual_settings(self):
         with patch.object(self.helper.sys, "argv", ["helper", "--display", "", "--wayland-display", "wayland-1", "--xauthority", "", "--manual"]), \
@@ -230,8 +237,10 @@ class LauncherTests(unittest.TestCase):
              patch.object(self.helper, "display_environment", return_value={"QT_QPA_PLATFORM": "wayland"}), \
              patch.object(self.helper.os, "chdir"), \
              patch.object(self.helper.os, "umask"), \
+             patch.object(self.helper, "probe_disks") as probe, \
              patch.object(self.helper.os, "execve") as execute:
             self.helper.main()
+        probe.assert_not_called()
         self.assertEqual(execute.call_args.args[0:2], ("/usr/bin/calamares", ["calamares", "--xdg-config"]))
         self.assertEqual(execute.call_args.args[2]["XDG_CONFIG_DIRS"], "/usr/share/desos/calamares-manual:/etc")
         installed = (BASE / "install_into_rootfs.py").read_text()
@@ -243,16 +252,23 @@ class LauncherTests(unittest.TestCase):
 class ConfigurationTests(unittest.TestCase):
     def test_real_backend_modules_and_cleanup_run_before_initramfs_and_bootloader(self):
         settings = yaml.safe_load((BASE / "calamares/settings.conf").read_text())
-        # The disks are read before the first page; the DesOS disk page and job
-        # stand where Calamares's partition page and job were.
-        self.assertEqual(settings["sequence"][0], {"exec": ["desosdiskprobe"]})
-        show = settings["sequence"][1]["show"]
-        jobs = settings["sequence"][2]["exec"]
+        # The DesOS disk page and job stand where Calamares's partition page and
+        # job were. No work phase before the first page: it would add steps to
+        # the rail (the launcher reads the disks instead).
+        show = settings["sequence"][0]["show"]
+        jobs = settings["sequence"][1]["exec"]
         self.assertEqual(show, ["welcome", "locale", "keyboard", "notesqml@desosdisk", "users", "summary"])
-        self.assertEqual(settings["instances"], [{"id": "desosdisk", "module": "notesqml", "config": "desosdisk.conf"}])
+        self.assertEqual(settings["instances"], [
+            {"id": "desosdisk", "module": "notesqml", "config": "desosdisk.conf"},
+            # Ubuntu's bootloader job declares requiredModules: [partition].
+            {"id": "bootloader", "module": "desosbootloader", "config": "bootloader.conf"}])
         self.assertEqual(jobs[0], "desosdisk")
         self.assertNotIn("partition", jobs)
-        self.assertTrue({"mount", "unpackfs", "users", "fstab", "initramfs", "bootloader", "umount"}.issubset(jobs))
+        self.assertTrue({"mount", "unpackfs", "users", "fstab", "initramfs", "desosbootloader@bootloader", "umount"}.issubset(jobs))
+        wrapper = (BASE / "modules/desosbootloader/main.py").read_text()
+        self.assertIn('"/usr/lib/x86_64-linux-gnu/calamares/modules/bootloader/main.py"', wrapper)
+        self.assertNotIn("requiredModules", (BASE / "modules/desosbootloader/module.desc").read_text())
+        jobs = [job.replace("desosbootloader@bootloader", "bootloader") for job in jobs]
         page = yaml.safe_load((BASE / "calamares/modules/desosdisk.conf").read_text())
         self.assertEqual((page["qmlSearch"], page["qmlFilename"]), ("branding", "desosdisk"))
         self.assertTrue((BASE / "branding/desos/desosdisk.qml").is_file())
@@ -302,7 +318,9 @@ class ConfigurationTests(unittest.TestCase):
             kernels.mkdir()
             command = (final["script"].replace("/boot/grub/grub.cfg", str(grub))
                        .replace("/usr/lib/desos/select-upstream-kernel", str(selector))
-                       .replace("/boot/vmlinuz-* /boot/initrd.img-*", f"{kernels}/vmlinuz-* {kernels}/initrd.img-*"))
+                       .replace('BOOT = "/boot"', f'BOOT = "{kernels}"'))
+            # Calamares substitutes $name in shellprocess scripts and refuses unknown ones.
+            self.assertNotIn("$", final["script"])
             self.assertNotIn(" /boot/", command.replace(str(kernels), "FIXTURE"), "the fragment must not reach the host /boot")
             missing = subprocess.run(["/bin/sh", "-c", command], capture_output=True)
             self.assertNotEqual(missing.returncode, 0)

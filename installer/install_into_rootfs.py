@@ -46,7 +46,7 @@ def install(root, source):
         (source / "branding/desos", "usr/share/calamares/branding/desos"),
         (source / "modules/desoscleanup", "usr/lib/desos/calamares/modules/desoscleanup"),
         (source / "modules/desosdisk", "usr/lib/desos/calamares/modules/desosdisk"),
-        (source / "modules/desosdiskprobe", "usr/lib/desos/calamares/modules/desosdiskprobe"),
+        (source / "modules/desosbootloader", "usr/lib/desos/calamares/modules/desosbootloader"),
         (source / "calamares-manual", "usr/share/desos/calamares-manual"),
     ):
         for path in sorted(source_dir.rglob("*")):
