@@ -36,6 +36,7 @@ The redesign started from the 0.1 validation screenshots
 | Step rail | `sidebar: qml`, `calamares-sidebar.qml` | The widget rail paints itself in C++ and cannot show done and to-do |
 | Install progress | `show.qml`, `slideshowAPI: 2` | Something worth reading while files copy |
 | Welcome picture | `welcome.png` | The only place on that page DesOS can speak |
+| Disk page | `desosdisk.qml` (a `notesqml` instance), jobs `desosdiskprobe` and `desosdisk` | Calamares's partition page cannot do a recommended plan with swap and /home choices; see [The disk page](#the-disk-page) |
 
 If `calamares-sidebar.qml` fails to load, the rail is an empty panel and every
 page and button still works. Setting `sidebar: widget` in `branding.desc`
@@ -162,6 +163,40 @@ card every sixteen seconds and stops when installation ends. The only motion
 is a 300 ms cross-fade. The card shrinks as a whole if the window is too small
 to hold it. It imports QtQuick and nothing else, and loads no images.
 
+## The disk page
+
+The first real install was partitioned by hand: Calamares's page offered no
+swap and manual mode does not add the EFI partition. The disk page is now
+DesOS's own (design: the installer flow canvas, "Disk, step 2").
+
+- `desosdiskprobe` runs before the first page. It reads the disks (lsblk),
+  the systems on them (os-prober), the memory and the firmware, and puts them
+  in global storage. It writes nothing.
+- `desosdisk.qml` shows the disks, biggest usable first, and three choices:
+  file system (btrfs with undo, the default, or ext4), swap (none, a small
+  partition, or one the size of RAM for hibernation) and a separate /home
+  partition with a size. A bar shows the disk now and after. It writes only
+  `desosDiskChoice`.
+- `desosdisk` runs where Calamares's partition job ran. It reads the disks
+  again, refuses any disk the probe would not offer (the live USB, read-only
+  or too small), makes the plan with `modules/desosdisk/plan.py`, writes it
+  with sfdisk and mkfs, and describes the result in the partition module's
+  own format for mount, fstab, bootloader and grubcfg.
+
+The sizes are computed in Python and drawn in QML from the same constants; a
+test keeps them equal. Every layout the planner can make is tested
+(`tests/test_desosdisk.py`).
+
+Manual partitioning is a separate entry, "Install DesOS (manual partitions)"
+(`desos-installer --manual`): Calamares cannot show its partition page only
+when asked, so that entry starts Calamares with
+`installer/calamares-manual/` first in `XDG_CONFIG_DIRS`, the same steps with
+Calamares's partition page and job in place of the disk page.
+
+Not yet built: "Reinstall, keep my files" (the mount job would recreate the
+existing `@home` subvolume and fail), and fixing a missing EFI partition from
+inside manual mode.
+
 ## Wording that DesOS cannot change
 
 The welcome heading, its one line of body text and the whole of the last page
@@ -207,15 +242,19 @@ python3-cairo on the build host only.
 - **Pop-up list rows** in choosers are drawn by Qt's combo delegate, so only
   their selection colours are set, not their row padding.
 
-## Safety properties, unchanged
+## Safety properties
 
-- No disk operation is preselected; the summary and Calamares's final
-  confirmation stay.
+- The disk page selects the first usable disk and the recommended plan, so
+  nobody has to partition by hand, but nothing is written before the summary
+  and Calamares's final confirmation, which stay. The live USB, read-only
+  disks and disks too small for DesOS are shown and never offered, and the
+  install job checks the disk again before writing.
 - Automatic login stays unavailable.
 - "Restart now" stays unticked.
 - No remote content, analytics, GeoIP or log upload. The QML imports no
   network or image elements and a test enforces that.
-- Pages and navigation are widgets. No page depends on a QML file.
+- Navigation is widgets. Every page but the disk page is a widget page; if
+  `desosdisk.qml` fails to load, `desos-installer --manual` still installs.
 
 ## Calamares contracts relied on
 

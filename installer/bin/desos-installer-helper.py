@@ -67,11 +67,16 @@ def display_environment(uid, display, wayland, xauthority):
     return env
 
 
+MANUAL_CONFIG = "/usr/share/desos/calamares-manual"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Launch the DesOS live installer")
     parser.add_argument("--display", required=True)
     parser.add_argument("--wayland-display", required=True)
     parser.add_argument("--xauthority", required=True)
+    parser.add_argument("--manual", action="store_true",
+                        help="Calamares' partition page instead of the DesOS disk page")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise ValueError("The installer helper must be launched through pkexec")
@@ -94,8 +99,14 @@ def main():
     os.umask(0o077)
     # The standard search uses /etc/calamares and /usr/share/calamares.
     # Do not use -c: that overrides the data directory, hiding the branding.
-    # Neither arguments nor configuration paths are caller-controlled.
-    os.execve("/usr/bin/calamares", ["calamares"], env)
+    # Neither arguments nor configuration paths are caller-controlled: --manual
+    # only switches to the fixed, root-owned MANUAL_CONFIG settings, found first
+    # through XDG_CONFIG_DIRS (module configuration then comes from /etc).
+    if args.manual:
+        env["XDG_CONFIG_DIRS"] = f"{MANUAL_CONFIG}:/etc"
+        os.execve("/usr/bin/calamares", ["calamares", "--xdg-config"], env)
+    else:
+        os.execve("/usr/bin/calamares", ["calamares"], env)
 
 
 if __name__ == "__main__":

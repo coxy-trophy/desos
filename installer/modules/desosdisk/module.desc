@@ -1,0 +1,6 @@
+---
+type: job
+interface: python
+name: desosdisk
+script: main.py
+noconfig: true

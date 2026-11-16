@@ -373,7 +373,7 @@ class StylesheetTests(unittest.TestCase):
 
 
 class QmlTests(unittest.TestCase):
-    FILES = ("show.qml", "calamares-sidebar.qml")
+    FILES = ("show.qml", "calamares-sidebar.qml", "desosdisk.qml")
     TEXT_ROLES = ("text", "secondary", "accent")
     SURFACES = ("ground", "panel", "track", "tint")
 
@@ -410,6 +410,8 @@ class QmlTests(unittest.TestCase):
         # Exactly the modules the sidebar embedded in the 3.3.14 binary imports.
         self.assertEqual(imports["calamares-sidebar.qml"],
                          ["io.calamares.ui 1.0", "io.calamares.core 1.0", "QtQuick 2.15"])
+        # The disk page reads and writes Global storage; nothing else.
+        self.assertEqual(imports["desosdisk.qml"], ["io.calamares.core 1.0", "QtQuick 2.15"])
 
     def test_nothing_remote_no_images_and_no_busy_motion(self):
         for name, (code, strings) in self.code.items():
@@ -436,7 +438,8 @@ class QmlTests(unittest.TestCase):
                 self.assertTrue(set(palette.values()) <= TOKENS)
                 # Colour literals live only in the palette object.
                 self.assertEqual(HEX.findall(text.replace(block, "")), [])
-                for role in self.TEXT_ROLES:
+                # Warnings (the disk page) are caution amber, held to the same bar.
+                for role in (*self.TEXT_ROLES, *(("caution",) if "caution" in palette else ())):
                     for surface in self.SURFACES:
                         if surface in palette:
                             ratio = contrast(palette[role], palette[surface])
@@ -451,7 +454,7 @@ class QmlTests(unittest.TestCase):
                 for element in re.findall(r"\bText \{[^{}]*\}", code):
                     roles = set(re.findall(r"pal\.(\w+)", element))
                     self.assertTrue(roles, "Text without an explicit palette colour")
-                    self.assertTrue(roles <= {*self.TEXT_ROLES, "label"}, roles)
+                    self.assertTrue(roles <= {*self.TEXT_ROLES, "label", "caution"}, roles)
                 self.assertNotRegex(code, r'color:\s*""')
         rail, _ = qml_palette(self.source["calamares-sidebar.qml"])
         # "label" marks steps still to do; it is only ever drawn on the rail's panel.
@@ -605,6 +608,42 @@ class PageConfigurationTests(unittest.TestCase):
                 self.assertIn(path.name, design)
         for needed in ("sidebar: qml", "navigation: widget", "4.5:1", "3:1", "unverified"):
             self.assertIn(needed, design)
+
+
+class DiskPageTests(unittest.TestCase):
+    """desosdisk.qml draws the plan that plan.py makes: the same numbers."""
+
+    def setUp(self):
+        self.qml = (BRANDING / "desosdisk.qml").read_text()
+        import importlib, sys
+        sys.path.insert(0, str(INSTALLER / "modules/desosdisk"))
+        self.plan = importlib.import_module("plan")
+
+    def number(self, name):
+        return int(re.search(rf"readonly property int {name}: (\d+)", self.qml).group(1))
+
+    def test_the_page_uses_the_planner_s_sizes(self):
+        plan = self.plan
+        self.assertEqual(self.number("efiMib") * plan.MiB, plan.EFI_SIZE)
+        self.assertEqual(self.number("smallSwapGib") * plan.GiB, plan.SMALL_SWAP_MAX)
+        self.assertEqual(self.number("minRootGib") * plan.GiB, plan.MIN_ROOT)
+        self.assertEqual(self.number("minHomeGib") * plan.GiB, plan.MIN_HOME)
+        self.assertIn(f"- 33 * disk.sector", self.qml)
+        self.assertEqual(plan.GPT_TAIL_SECTORS, 33)
+
+    def test_the_choice_has_the_keys_the_job_reads(self):
+        job = (INSTALLER / "modules/desosdisk/main.py").read_text()
+        for key in ("mode", "disk", "filesystem", "swap", "homeBytes"):
+            self.assertIn(f'"{key}":', self.qml)
+            self.assertIn(f'"{key}"', job)
+        for value in ("btrfs", "ext4", "none", "small", "suspend"):
+            self.assertIn(f'"{value}"', self.qml)
+        self.assertEqual(set(self.plan.SWAP_CHOICES), {"none", "small", "suspend"})
+
+    def test_the_wide_fills_carry_readable_text(self):
+        palette, _ = qml_palette(self.qml)
+        for fill in ("chunk", "strong", "tint"):
+            self.assertGreaterEqual(contrast(palette["text"], palette[fill]), TEXT_AA, fill)
 
 
 if __name__ == "__main__":

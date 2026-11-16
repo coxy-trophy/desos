@@ -45,6 +45,9 @@ def install(root, source):
         (source / "calamares", "etc/calamares"),
         (source / "branding/desos", "usr/share/calamares/branding/desos"),
         (source / "modules/desoscleanup", "usr/lib/desos/calamares/modules/desoscleanup"),
+        (source / "modules/desosdisk", "usr/lib/desos/calamares/modules/desosdisk"),
+        (source / "modules/desosdiskprobe", "usr/lib/desos/calamares/modules/desosdiskprobe"),
+        (source / "calamares-manual", "usr/share/desos/calamares-manual"),
     ):
         for path in sorted(source_dir.rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts:
@@ -58,6 +61,7 @@ def install(root, source):
         ("polkit/org.desos.installer.policy", "usr/share/polkit-1/actions/org.desos.installer.policy", 0o644),
         ("polkit/49-desos-live-installer.rules", "etc/polkit-1/rules.d/49-desos-live-installer.rules", 0o644),
         ("desktop/desos-installer.desktop", "usr/share/applications/desos-installer.desktop", 0o644),
+        ("desktop/desos-installer-manual.desktop", "usr/share/applications/desos-installer-manual.desktop", 0o644),
         ("branding/desos/icon.svg", "usr/share/icons/hicolor/scalable/apps/desos-installer.svg", 0o644),
     ):
         copies.append((source / src, safe_destination(root, dest), mode))

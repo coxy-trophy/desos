@@ -1,9 +1,12 @@
 #!/bin/sh
 # Pass only display connection hints; the privileged helper validates each one.
-if [ "$#" -ne 0 ]; then
-    echo "Usage: desos-installer" >&2
-    exit 64
-fi
+# --manual: Calamares' own partition page instead of the DesOS disk page.
+mode=
+case "$#:${1-}" in
+    0:) ;;
+    1:--manual) mode=--manual ;;
+    *) echo "Usage: desos-installer [--manual]" >&2; exit 64 ;;
+esac
 wayland_display=${WAYLAND_DISPLAY-}
 if [ -z "$wayland_display" ]; then
     wayland_display=$(/usr/bin/systemctl --user show-environment 2>/dev/null |
@@ -11,4 +14,4 @@ if [ -z "$wayland_display" ]; then
 fi
 exec /usr/bin/pkexec /usr/libexec/desos-installer-helper \
     --display "${DISPLAY-}" --wayland-display "$wayland_display" \
-    --xauthority "${XAUTHORITY-}"
+    --xauthority "${XAUTHORITY-}" $mode

@@ -218,15 +218,50 @@ class LauncherTests(unittest.TestCase):
              patch.object(self.helper.os, "execve") as execute:
             self.helper.main()
         self.assertEqual(execute.call_args.args[0:2], ("/usr/bin/calamares", ["calamares"]))
+        self.assertNotIn("XDG_CONFIG_DIRS", execute.call_args.args[2])
+
+    def test_manual_mode_switches_only_to_the_fixed_manual_settings(self):
+        with patch.object(self.helper.sys, "argv", ["helper", "--display", "", "--wayland-display", "wayland-1", "--xauthority", "", "--manual"]), \
+             patch.dict(os.environ, {"PKEXEC_UID": "1000"}), \
+             patch.object(self.helper.os, "geteuid", return_value=0), \
+             patch.object(self.helper.pwd, "getpwuid", return_value=SimpleNamespace(pw_name="desos")), \
+             patch.object(self.helper.subprocess, "check_output", return_value="active\n"), \
+             patch.object(self.helper, "validate_live_media"), \
+             patch.object(self.helper, "display_environment", return_value={"QT_QPA_PLATFORM": "wayland"}), \
+             patch.object(self.helper.os, "chdir"), \
+             patch.object(self.helper.os, "umask"), \
+             patch.object(self.helper.os, "execve") as execute:
+            self.helper.main()
+        self.assertEqual(execute.call_args.args[0:2], ("/usr/bin/calamares", ["calamares", "--xdg-config"]))
+        self.assertEqual(execute.call_args.args[2]["XDG_CONFIG_DIRS"], "/usr/share/desos/calamares-manual:/etc")
+        installed = (BASE / "install_into_rootfs.py").read_text()
+        self.assertIn('(source / "calamares-manual", "usr/share/desos/calamares-manual")', installed)
+        launcher = (BASE / "bin/desos-installer").read_text()
+        self.assertIn("1:--manual) mode=--manual", launcher)
 
 
 class ConfigurationTests(unittest.TestCase):
     def test_real_backend_modules_and_cleanup_run_before_initramfs_and_bootloader(self):
         settings = yaml.safe_load((BASE / "calamares/settings.conf").read_text())
-        show = settings["sequence"][0]["show"]
-        jobs = settings["sequence"][1]["exec"]
-        self.assertEqual(show, ["welcome", "locale", "keyboard", "partition", "users", "summary"])
-        self.assertTrue({"partition", "mount", "unpackfs", "users", "fstab", "initramfs", "bootloader", "umount"}.issubset(jobs))
+        # The disks are read before the first page; the DesOS disk page and job
+        # stand where Calamares's partition page and job were.
+        self.assertEqual(settings["sequence"][0], {"exec": ["desosdiskprobe"]})
+        show = settings["sequence"][1]["show"]
+        jobs = settings["sequence"][2]["exec"]
+        self.assertEqual(show, ["welcome", "locale", "keyboard", "notesqml@desosdisk", "users", "summary"])
+        self.assertEqual(settings["instances"], [{"id": "desosdisk", "module": "notesqml", "config": "desosdisk.conf"}])
+        self.assertEqual(jobs[0], "desosdisk")
+        self.assertNotIn("partition", jobs)
+        self.assertTrue({"mount", "unpackfs", "users", "fstab", "initramfs", "bootloader", "umount"}.issubset(jobs))
+        page = yaml.safe_load((BASE / "calamares/modules/desosdisk.conf").read_text())
+        self.assertEqual((page["qmlSearch"], page["qmlFilename"]), ("branding", "desosdisk"))
+        self.assertTrue((BASE / "branding/desos/desosdisk.qml").is_file())
+        # Manual partitions: the same steps with Calamares's page and job instead.
+        manual = yaml.safe_load((BASE / "calamares-manual/calamares/settings.conf").read_text())
+        self.assertEqual(manual["sequence"][0]["show"], ["welcome", "locale", "keyboard", "partition", "users", "summary"])
+        self.assertEqual(manual["sequence"][1]["exec"], ["partition", *jobs[1:]])
+        self.assertEqual({k: v for k, v in manual.items() if k != "sequence"},
+                         {k: v for k, v in settings.items() if k not in ("sequence", "instances")})
         self.assertLess(jobs.index("users"), jobs.index("desoscleanup"))
         self.assertLess(jobs.index("desoscleanup"), jobs.index("initramfs"))
         self.assertLess(jobs.index("initramfs"), jobs.index("bootloader"))

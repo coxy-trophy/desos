@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Install DesOS (manual partitions)
+GenericName=Operating system installer
+Comment=Install DesOS on partitions you set up yourself
+Exec=/usr/bin/desos-installer --manual
+TryExec=/usr/bin/desos-installer
+Icon=desos-installer
+Terminal=false
+Categories=System;
+Keywords=install;DesOS;partition;manual;
+StartupNotify=true
