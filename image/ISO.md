@@ -11,11 +11,11 @@ bash /opt/desos-build/recipe/image/build-iso.sh \
 ```
 
 The clean rootfs must already identify as `ID=desos`, contain the desktop,
-Calamares launcher, Casper and initramfs-tools, and provide both:
+Calamares launcher, Casper and initramfs-tools, and provide:
 
 - `/boot/vmlinuz-6.18.62-desos` with matching `/lib/modules/6.18.62-desos`.
-- A Ubuntu `/boot/vmlinuz-7.0.*-generic` and matching module directory. The highest
-  numeric version is chosen and recorded; unrelated kernels are ignored.
+- No Ubuntu `/boot/vmlinuz-*-generic`: one in the rootfs is refused, so the ISO
+  boots only the DesOS kernel.
 
 The worker needs `squashfs-tools`, `initramfs-tools-core`, `grub-common`,
 `grub-pc-bin`, `grub-efi-amd64-bin`, `xorriso`, `mtools`, Python 3 and ordinary
@@ -53,7 +53,6 @@ It copies the **actual generated** `conf/uuid.conf` to:
 
 ```
 ISO/.disk/casper-uuid-upstream
-ISO/.disk/casper-uuid-compat
 ```
 
 This matches the inspected Ubuntu Casper **26.04.2** package source in
@@ -94,15 +93,14 @@ menu has these entries, each titled `Name - what it does`:
 
 1. **Try DesOS**, default after eight seconds, upstream kernel.
 2. **Install DesOS**, upstream kernel, adds only `desos.install=1`.
-3. **Compatibility: Ubuntu kernel**, matched Ubuntu kernel/initrd.
-4. **Debug DesOS upstream**, verbose boot diagnostics.
-5. **Boot from first hard disk**. UEFI: `exit 1`, so the firmware continues
+3. **Debug DesOS upstream**, verbose boot diagnostics.
+4. **Boot from first hard disk**. UEFI: `exit 1`, so the firmware continues
    with its next boot entry. BIOS: chainloads the first disk that is not the
    live medium. A USB stick is `hd0` to the BIOS, so the entry then swaps
    `hd0`/`hd1` with `drivemap` and starts `hd1`; from optical media it starts
    `hd0`. It returns to the firmware console first, because a boot sector
    expects the BIOS text mode.
-6. **UEFI firmware settings**, only on UEFI and only when
+5. **UEFI firmware settings**, only on UEFI and only when
    `fwsetup --is-supported` succeeds.
 
 ### Graphics and fallback
@@ -157,7 +155,7 @@ Output contains:
   identities and stage/ISO hashes. Boot-validation status remains **pending**.
 - `iso-boot-structure.txt`: actual xorriso El Torito/system-area report.
 - `filesystem.manifest`, `filesystem.size` and retained `iso-staging/`.
-- `initrd-audit-upstream/` and `initrd-audit-compat/` for matched-module/UUID review.
+- `initrd-audit-upstream/` for matched-module/UUID review.
 
 The ISO includes `/casper/filesystem.manifest`, `filesystem.manifest-desktop`,
 `filesystem.size`, both kernel/initrd pairs, `.disk` identity/UUID markers,

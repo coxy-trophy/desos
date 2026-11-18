@@ -88,10 +88,10 @@ SPLASH = '''case " $GRUB_CMDLINE_LINUX_DEFAULT " in
 esac
 '''
 
-# Without this GRUB's top entry starts the highest-numbered kernel, Ubuntu's
-# compatibility kernel, and the DesOS kernel hides inside Advanced options.
-TOP_LEVEL = '''# The top "DesOS GNU/Linux" entry starts the newest DesOS kernel; Ubuntu's
-# kernel stays under Advanced options as the fallback.
+# The top entry starts the newest DesOS kernel even if some other kernel with a
+# higher number (an old install's Ubuntu kernel) is still present.
+TOP_LEVEL = '''# The top "DesOS GNU/Linux" entry starts the newest DesOS kernel; older ones
+# stay under Advanced options as the fallback.
 desos_kernel=$(ls /boot/vmlinuz-*-desos 2>/dev/null | sort -V | tail -n 1)
 [ -z "$desos_kernel" ] || GRUB_TOP_LEVEL=$desos_kernel
 unset desos_kernel

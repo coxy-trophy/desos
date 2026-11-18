@@ -7,15 +7,15 @@ does not copy the development machine or install over the host system.
 
 The first release is **0.1 Preview**. It has its own release identity, kernel
 configuration, live boot menu, installer integration and signed component
-repository. Ubuntu remains the package base and supplies a clearly labelled
-compatibility kernel. This is a derivative distribution, with the upstream
+repository. Ubuntu remains the package base; the kernel is DesOS's own, and
+no Ubuntu kernel is installed or offered (an apt pin keeps them out). This is a
+derivative distribution, with the upstream
 projects' authorship and licenses preserved.
 
 ## Booting the preview
 
 The hybrid ISO is intended for BIOS and UEFI boot. The themed menu offers Try
-DesOS, Install DesOS, the Ubuntu compatibility kernel, upstream kernel
-diagnostics, booting the first hard disk and, on UEFI, firmware setup. It falls
+DesOS, Install DesOS, upstream kernel diagnostics, booting the first hard disk and, on UEFI, firmware setup. It falls
 back to a plain text menu if the theme cannot load.
 Try boots a temporary desktop without installing. Install opens Calamares;
 partition changes require its own explicit confirmation.
@@ -178,8 +178,8 @@ kernel; this is tested only as package metadata, not on a running system. The
 preview signing key is a local development key, not a production
 key-management service.
 Maintaining upstream kernel security updates requires rebuilding and releasing
-new DesOS packages; Ubuntu's compatibility-kernel updates do not update the
-separate upstream kernel automatically.
+new DesOS packages; there is no Ubuntu kernel to fall back on, and the previous
+DesOS kernel is the fallback once a newer one is installed.
 
 Release checksums, signatures, component provenance and observed runtime results
 belong alongside the final ISO. Do not infer completion from this repository's

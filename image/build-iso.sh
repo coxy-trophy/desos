@@ -38,7 +38,6 @@ selection=$(python3 "$here/iso_recipe.py" prepare --root "$root" --output "$outp
 grub-script-check "$stage/boot/grub/grub.cfg"
 [[ -f $stage/boot/grub/themes/desos/theme.txt ]] || { echo 'Boot theme was not staged' >&2; exit 1; }
 upstream=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["upstream"])' "$selection")
-compat=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["compat"])' "$selection")
 mounts=()
 cleanup() {
     local code=$?
@@ -63,8 +62,9 @@ mount -t proc proc "$root/proc"
 mounts+=("$root/proc")
 mount -t sysfs sysfs "$root/sys"
 mounts+=("$root/sys")
-for flavor in upstream compat; do
-    if [[ $flavor == upstream ]]; then version=$upstream; else version=$compat; fi
+# DesOS boots only its own kernel.
+for flavor in upstream; do
+    version=$upstream
     [[ ! -L $root/boot ]] || { echo 'Refusing boot-directory symlink' >&2; exit 2; }
     action=-c
     [[ ! -e $root/boot/initrd.img-$version ]] || action=-u

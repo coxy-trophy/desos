@@ -173,6 +173,25 @@ class UpgradeAndSwapTests(unittest.TestCase):
         # The suites the pattern names are the ones the image actually configures.
         self.assertIn(f'Suites: {codename}-security', (REPO / 'image/build-rootfs.sh').read_text())
 
+    def test_ubuntu_kernels_are_never_installed_and_firmware_still_is(self):
+        import fnmatch
+        text = (TREE / 'etc/apt/preferences.d/desos-kernel').read_text()
+        stanza = dict(line.split(': ', 1) for line in text.splitlines() if not line.startswith('Explanation:'))
+        self.assertEqual(stanza['Pin'], 'release o=Ubuntu')
+        self.assertEqual(stanza['Pin-Priority'], '-1')
+        patterns = stanza['Package'].split()
+        blocked = lambda name: any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+        for name in ('linux-generic', 'linux-image-generic', 'linux-headers-generic', 'linux-image-7.0.0-43-generic',
+                     'linux-modules-7.0.0-43-generic', 'linux-modules-extra-7.0.0-43-generic', 'linux-headers-7.0.0-43',
+                     'linux-signed-generic', 'linux-generic-hwe-26.04', 'linux-virtual', 'linux-oem-24.04',
+                     'linux-main-modules-zfs-7.0.0-43-generic', 'linux-main-modules-v4l2loopback-7.0.0-43-generic'):
+            self.assertTrue(blocked(name), name)
+        for name in ('linux-firmware', 'linux-libc-dev', 'linux-base', 'linux-tools-common', 'linux-sound-base'):
+            self.assertFalse(blocked(name), name)
+        # The image installs no Ubuntu kernel either.
+        names = (REPO / 'image/packages.list').read_text().split()
+        self.assertFalse([name for name in names if blocked(name)])
+
     def test_no_background_upgrades_in_the_ram_backed_live_session(self):
         for unit in ('apt-daily', 'apt-daily-upgrade'):
             text = (TREE / f'etc/systemd/system/{unit}.service.d/10-desos-live.conf').read_text()

@@ -180,12 +180,11 @@ versioned package becomes an automatically installed dependency that nothing
 depends on, so `apt autoremove` and unattended-upgrades
 (`Remove-Unused-Kernel-Packages`, on by default) remove it. apt protects the
 running kernel and, as far as its documented rule goes, the two
-highest-versioned installed `linux-image-*` packages of any flavour. Ubuntu's
-7.x compatibility kernels outrank 6.18.x, so a superseded DesOS kernel is kept
-only while it is the one running: after rebooting into the new kernel the old
-one goes at the next autoremove, and the fallback is the Ubuntu compatibility
-kernel, not the previous DesOS kernel. Whether to pin one previous DesOS
-kernel is an open policy choice; this behaviour is read from apt's
-configuration, not observed on a DesOS system. The 0.1 image installed the
+highest-versioned installed `linux-image-*` packages of any flavour. DesOS
+installs no Ubuntu kernel (`system/rootfs/etc/apt/preferences.d/desos-kernel`
+pins them out of the Ubuntu archive), so those two are DesOS kernels: after an
+upgrade the previous DesOS kernel stays as the fallback under Advanced options.
+This behaviour is read from apt's configuration, not observed on a DesOS
+system. The 0.1 image installed the
 versioned packages by name (manually installed), so on such a system they are
 never removed automatically.

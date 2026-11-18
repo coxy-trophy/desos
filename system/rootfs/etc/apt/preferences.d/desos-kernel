@@ -1,0 +1,8 @@
+Explanation: DesOS boots only its own kernel (linux-image-desos). Ubuntu's
+Explanation: kernels, their modules and headers are never installed from the
+Explanation: Ubuntu archive, so no upgrade or recommendation brings them back.
+Explanation: linux-firmware, linux-libc-dev and linux-base are not kernels and
+Explanation: stay available.
+Package: linux-generic* linux-image-* linux-modules-* linux-main-modules-* linux-headers-* linux-signed-* linux-virtual* linux-lowlatency* linux-oem-* linux-hwe-* linux-kvm*
+Pin: release o=Ubuntu
+Pin-Priority: -1

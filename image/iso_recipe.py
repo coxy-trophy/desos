@@ -62,13 +62,11 @@ def select_kernels(root):
         raise ValueError('boot directory must not be a symlink')
     if not rooted(root, f'boot/vmlinuz-{UPSTREAM}').is_file():
         raise ValueError('required upstream kernel image absent: ' + UPSTREAM)
-    candidates = [path.name.removeprefix('vmlinuz-') for path in (root / 'boot').glob('vmlinuz-7.0.*-generic')]
-    if not candidates:
-        raise ValueError('Ubuntu 7.0 generic compatibility kernel absent')
-    def version_key(version):
-        return tuple(int(token) for token in re.findall(r'\d+', version))
-    compat = max(candidates, key=version_key)
-    selected = {'upstream': UPSTREAM, 'compat': compat}
+    # DesOS boots only its own kernel: a Ubuntu kernel in the image is a mistake.
+    ubuntu = sorted(path.name for path in (root / 'boot').glob('vmlinuz-*-generic'))
+    if ubuntu:
+        raise ValueError('Ubuntu kernel present in the image: ' + ', '.join(ubuntu))
+    selected = {'upstream': UPSTREAM}
     for version in selected.values():
         for name in ('vmlinuz-' + version, 'initrd.img-' + version):
             if (root / 'boot' / name).is_symlink():
@@ -97,7 +95,6 @@ LIVE_ENTRIES = [
     # (id, class, title, one-line description, kernel flavor, extra arguments)
     ('desos-try', 'desos', 'Try ' + RELEASE, 'live desktop, nothing is installed', 'upstream', SPLASH),
     ('desos-install', 'install', 'Install ' + RELEASE, 'live desktop, opens the installer', 'upstream', SPLASH + ' desos.install=1'),
-    ('desos-compat', 'compat', 'Compatibility: Ubuntu kernel', 'if the DesOS kernel does not start', 'compat', SPLASH),
     ('desos-debug', 'debug', 'Debug DesOS upstream', 'verbose boot, no splash', 'upstream', ' debug loglevel=7 systemd.show_status=1'),
 ]
 
@@ -233,7 +230,7 @@ def stage_theme(stage, source=None):
 
 
 def copy_uuid(extraction, disk, flavor):
-    if flavor not in {'upstream', 'compat'}:
+    if flavor != 'upstream':
         raise ValueError('unknown kernel flavor')
     matches = sorted(extraction.glob('**/conf/uuid.conf'))
     values = {path.read_text().strip() for path in matches}
@@ -368,7 +365,7 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--stage', type=Path)
     parser.add_argument('--extraction', type=Path)
-    parser.add_argument('--flavor', choices=['upstream', 'compat'])
+    parser.add_argument('--flavor', choices=['upstream'])
     parser.add_argument('--iso', type=Path)
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()

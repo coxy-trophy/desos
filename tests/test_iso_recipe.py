@@ -33,11 +33,16 @@ class IsoRecipeTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             (root / 'boot').mkdir()
             (root / 'lib/modules').mkdir(parents=True)
-            versions = ['6.18.62-desos', '7.0.0-9-generic', '7.0.0-38-generic', '99.0-unrelated']
+            versions = ['6.18.62-desos', '99.0-unrelated']
             for version in versions:
                 (root / f'boot/vmlinuz-{version}').write_bytes(b'kernel')
                 (root / f'lib/modules/{version}').mkdir()
-            self.assertEqual(self.recipe.select_kernels(root), {'upstream': '6.18.62-desos', 'compat': '7.0.0-38-generic'})
+            self.assertEqual(self.recipe.select_kernels(root), {'upstream': '6.18.62-desos'})
+            # A Ubuntu kernel left in the image is refused, not quietly shipped.
+            (root / 'boot/vmlinuz-7.0.0-38-generic').write_bytes(b'kernel')
+            with self.assertRaisesRegex(ValueError, 'Ubuntu kernel'):
+                self.recipe.select_kernels(root)
+            (root / 'boot/vmlinuz-7.0.0-38-generic').unlink()
             (root / 'lib/modules/6.18.62-desos').rmdir()
             with self.assertRaisesRegex(ValueError, 'modules'):
                 self.recipe.select_kernels(root)
@@ -61,29 +66,29 @@ class IsoRecipeTests(unittest.TestCase):
         self.assertNotIn('ignore_uuid', menu)
         entries = self.kernel_entries()
         self.assertEqual([header.split('--id ')[1].split()[0] for header, _, _ in entries],
-                         ['desos-try', 'desos-install', 'desos-compat', 'desos-debug'])
+                         ['desos-try', 'desos-install', 'desos-debug'])
         for header, linux, entry in entries:
             self.assertIn('boot=casper', linux)
             self.assertIn('live-media-path=casper', linux)
             self.assertIn('nopersistent', linux)
             self.assertIn('username=desos hostname=desos-live', entry)
-            kernel = 'compat' if 'vmlinuz-compat' in entry else 'upstream'
-            self.assertIn(f'initrd /casper/initrd-{kernel}', entry)
+            # Every entry boots the DesOS kernel; there is no Ubuntu one.
+            self.assertIn('initrd /casper/initrd-upstream', entry)
+            self.assertNotIn('compat', entry)
             # Every entry says what it does, in plain ASCII for the text and serial menus.
             self.assertRegex(header, r'^"[^"]+ - [a-z][^"]+" --id \S+ --class \S+ \{$')
             self.assertTrue(header.isascii())
-        self.assertIn('vmlinuz-compat', entries[2][2])
 
     def test_normal_menu_entries_enable_plymouth_and_debug_stays_verbose(self):
         arguments = [linux for _, linux, _ in self.kernel_entries()]
-        self.assertEqual(len(arguments), 4)
-        for normal in arguments[:3]:
+        self.assertEqual(len(arguments), 3)
+        for normal in arguments[:2]:
             with self.subTest(entry=normal):
                 self.assertIn('quiet', normal)
                 self.assertIn('splash', normal)
                 # Without this Plymouth uses its text renderer whenever ttyS0 is a console.
                 self.assertIn('plymouth.ignore-serial-consoles', normal)
-        debug = arguments[3]
+        debug = arguments[2]
         self.assertNotIn('quiet', debug)
         self.assertNotIn('splash', debug)
         for token in ['debug', 'loglevel=7', 'systemd.show_status=1']:
@@ -178,7 +183,7 @@ class IsoRecipeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             (root / 'boot').mkdir()
-            for version in ['6.18.62-desos', '7.0.0-38-generic']:
+            for version in ['6.18.62-desos']:
                 (root / f'boot/vmlinuz-{version}').write_bytes(b'kernel')
                 (root / f'lib/modules/{version}').mkdir(parents=True)
             image = root / 'boot/vmlinuz-6.18.62-desos'
@@ -203,7 +208,7 @@ class IsoRecipeTests(unittest.TestCase):
             self.assertEqual((disk / 'casper-uuid-upstream').read_text(), uuid + '\n')
             (extraction / 'main/conf/uuid.conf').write_text('bad uuid\n')
             with self.assertRaises(ValueError):
-                self.recipe.copy_uuid(extraction, disk, 'compat')
+                self.recipe.copy_uuid(extraction, disk, 'upstream')
 
     def test_squash_command_excludes_pseudo_filesystems_and_uses_two_jobs(self):
         command = self.recipe.squash_command(pathlib.Path('/srv/desos-build/rootfs'), pathlib.Path('/srv/desos-build/output/iso/casper/filesystem.squashfs'))

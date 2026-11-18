@@ -108,8 +108,8 @@ is fatal. The installer first requires a nonempty `/boot/grub/grub.cfg`; a
 bootloader module that skipped installation cannot silently pass this final job.
 This installer-only guard leaves normal package post-install behavior unchanged.
 The helper selects the discovered `*-desos` kernel using generated
-stable menu IDs and `grub-set-default`, while preserving Ubuntu's compatibility
-kernel as recovery. The image supplies `/etc/default/grub.d/10-desos.cfg` with
+stable menu IDs and `grub-set-default`; DesOS installs no Ubuntu kernel, so the
+fallback under Advanced options is the previous DesOS kernel, once there is one. The image supplies `/etc/default/grub.d/10-desos.cfg` with
 `GRUB_DEFAULT=saved` and `GRUB_TOP_LEVEL` set to the newest DesOS kernel, so
 the first menu line, "DesOS GNU/Linux", starts the DesOS kernel; the helper
 chooses that line, or the kernel's own entry under Advanced options if the top

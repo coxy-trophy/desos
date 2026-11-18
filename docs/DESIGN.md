@@ -18,8 +18,9 @@ then verify the written bytes. A first preview is not all-hardware certification
 - Reuse the verified Ubuntu-native desktop packages from frozen source d462986;
   do not rebuild Rust or copy the development VM's accounts/SSH keys/state.
 - Build official unmodified Linux 6.18.62 LTS source, verify its detached upstream
-  signature, use a reproducible DesOS configuration, and retain an Ubuntu kernel
-  as an explicitly labeled compatibility/recovery choice.
+  signature, and use a reproducible DesOS configuration. It is the only kernel:
+  no Ubuntu kernel is shipped or installable (decided 18 Nov 2026); the previous
+  DesOS kernel is the recovery choice.
 - Build a clean filesystem with debootstrap. Casper supplies read-only squashfs
   plus a writable live overlay. GRUB hybrid ISO boots both BIOS and UEFI.
 - Calamares supplies the established partition/install backend, configured and
